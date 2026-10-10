@@ -24,10 +24,6 @@
 #include "tvgTaskScheduler.h"
 #include "tvgSwRenderer.h"
 
-#ifdef THORVG_OPENMP_SUPPORT
-    #include <omp.h>
-#endif
-
 /************************************************************************/
 /* Internal Class Implementation                                        */
 /************************************************************************/
@@ -203,14 +199,14 @@ struct SwImageTask : SwTask
     {
         //Convert colorspace if it's not aligned.
         rasterConvertCS(source, renderer->surface->cs);
-        rasterPremultiply(source);
+        rasterPremultiplySurface(source);
 
         image.data = source->data;
         image.w = source->w;
         image.h = source->h;
         image.stride = source->stride;
         image.channelSize = source->channelSize;
-        image.alphaIgnored = source->alphaIgnored;
+        image.alphaIgnored = source->opaque;
 
         auto updateImage = flags[0] & (RenderUpdateFlag::Image | RenderUpdateFlag::Clip | RenderUpdateFlag::Transform);
         auto updateColor = flags[0] & (RenderUpdateFlag::Color);
@@ -285,6 +281,7 @@ bool SwRenderer::sync()
 Result SwRenderer::target(pixel_t* data, uint32_t stride, uint32_t w, uint32_t h, ColorSpace cs)
 {
     if (!data || stride == 0 || w == 0 || h == 0 || w > stride) return Result::InvalidArguments;
+    if (cs != ColorSpace::ABGR8888 && cs != ColorSpace::ABGR8888S && cs != ColorSpace::ARGB8888 && cs != ColorSpace::ARGB8888S) return Result::NonSupport;
 
     clearCompositors();
 
@@ -354,7 +351,7 @@ bool SwRenderer::postRender()
 {
     //Unmultiply alpha if needed
     if (surface->cs == ColorSpace::ABGR8888S || surface->cs == ColorSpace::ARGB8888S) {
-        rasterUnpremultiply(surface);
+        rasterUnpremultiplySurface(surface);
     }
 
     dirtyRegion.clear();
@@ -677,6 +674,7 @@ bool SwRenderer::endComposite(RenderCompositor* cmp)
 void SwRenderer::prepare(RenderEffect* effect, const Matrix& transform)
 {
     switch (effect->type) {
+        case SceneEffect::MotionBlur: effectMotionBlurUpdate(static_cast<RenderEffectMotionBlur*>(effect), transform); break;
         case SceneEffect::GaussianBlur: effectGaussianBlurUpdate(static_cast<RenderEffectGaussianBlur*>(effect), transform); break;
         case SceneEffect::DropShadow: effectDropShadowUpdate(static_cast<RenderEffectDropShadow*>(effect), transform); break;
         case SceneEffect::Fill: effectFillUpdate(static_cast<RenderEffectFill*>(effect)); break;
@@ -756,6 +754,7 @@ bool SwRenderer::intersectsImage(RenderData data, const RenderRegion& region)
 bool SwRenderer::region(RenderEffect* effect)
 {
     switch (effect->type) {
+        case SceneEffect::MotionBlur: return effectMotionBlurRegion(static_cast<RenderEffectMotionBlur*>(effect));
         case SceneEffect::GaussianBlur: return effectGaussianBlurRegion(static_cast<RenderEffectGaussianBlur*>(effect));
         case SceneEffect::DropShadow: return effectDropShadowRegion(static_cast<RenderEffectDropShadow*>(effect));
         default: return false;
@@ -776,6 +775,9 @@ bool SwRenderer::render(RenderCompositor* cmp, const RenderEffect* effect, bool 
     if (p->recoverSfc->channelSize != sizeof(uint32_t)) direct = false;
     
     switch (effect->type) {
+        case SceneEffect::MotionBlur: {
+            return effectMotionBlur(p, request(surface->channelSize, true), static_cast<const RenderEffectMotionBlur*>(effect));
+        }
         case SceneEffect::GaussianBlur: {
             return effectGaussianBlur(p, request(surface->channelSize, true), static_cast<const RenderEffectGaussianBlur*>(effect));
         }
@@ -908,6 +910,7 @@ SwRenderer::SwRenderer(uint32_t threads, EngineOption op)
 #ifdef THORVG_OPENMP_SUPPORT
         omp_set_num_threads(threads);
 #endif
+        rasterInit();
         mpoolInit(threads);
         _rendererCnt = 0;
     }

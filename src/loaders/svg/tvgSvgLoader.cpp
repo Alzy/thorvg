@@ -397,9 +397,9 @@ _PARSE_TAG(BlendMethod, blendMode, BlendMode, blendModeTags, BlendMethod::Normal
  * Initial:    none
  * https://www.w3.org/TR/SVG/painting.html
  */
-static void _parseDashArray(SvgParserContext* ctx, const char* str, SvgDash* dash)
+static bool _parseDashArray(SvgParserContext* ctx, const char* str, SvgDash* dash)
 {
-    if (!strncmp(str, "none", 4)) return;
+    if (STR_AS(str, "none")) return true;
 
     char *end = nullptr;
 
@@ -409,7 +409,7 @@ static void _parseDashArray(SvgParserContext* ctx, const char* str, SvgDash* das
         if (str == end) break;
         if (parsedValue < 0.0f) {
             dash->array.reset();
-            return;
+            return false;
         }
         if (*end == '%') {
             ++end;
@@ -420,6 +420,7 @@ static void _parseDashArray(SvgParserContext* ctx, const char* str, SvgDash* das
         dash->array.push(parsedValue);
         str = end;
     }
+    return !dash->array.empty();
 }
 
 
@@ -1014,8 +1015,9 @@ static void _handleStrokeOpacityAttr(TVG_UNUSED SvgParserContext* ctx, SvgNode* 
 
 static void _handleStrokeDashArrayAttr(SvgParserContext* ctx, SvgNode* node, const char* value)
 {
-    node->style->stroke.flags = (node->style->stroke.flags | SvgStrokeFlags::Dash);
-    _parseDashArray(ctx, value, &node->style->stroke.dash);
+    if (_parseDashArray(ctx, value, &node->style->stroke.dash)) {
+        node->style->stroke.flags = (node->style->stroke.flags | SvgStrokeFlags::Dash);
+    }
 }
 
 static void _handleStrokeDashOffsetAttr(SvgParserContext* ctx, SvgNode* node, const char* value)
@@ -1339,7 +1341,7 @@ static bool _parseStyleAttr(void* data, const char* key, const char* value, bool
                 styleTags[i].tagHandler(ctx, node, value);
             }
             if (importance) {
-                node->style->flagsImportance = (node->style->flags | styleTags[i].flag);
+                node->style->flagsImportance |= styleTags[i].flag;
                 tvg::free(const_cast<char*>(value));
             }
             return true;
@@ -3506,14 +3508,12 @@ static void _svgLoaderParserXmlOpen(SvgParserContext* ctx, const char* content, 
             if (ctx->stack.count > 0) parent = ctx->stack.last();
             else parent = ctx->doc;
             if (STR_AS(tagName, "style")) {
-                // TODO: For now only the first style node is saved. After the css id selector
-                // is introduced this if condition shouldn't be necessary any more
                 if (!ctx->cssStyle) {
                     node = method(ctx, nullptr, attrs, attrsLength, xmlParseAttributes);
                     ctx->cssStyle = node;
                     ctx->doc->node.doc.style = node;
-                    ctx->openedTag = OpenedTagType::Style;
-                }
+                } else node = ctx->cssStyle;
+                ctx->openedTag = OpenedTagType::Style;
             } else {
                 node = method(ctx, parent, attrs, attrsLength, xmlParseAttributes);
             }

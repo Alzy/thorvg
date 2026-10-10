@@ -87,33 +87,11 @@ struct RenderSurface
     ColorSpace cs = ColorSpace::Unknown;
     uint8_t channelSize = 0;
     bool premultiplied = false;         //Alpha-premultiplied
-    bool alphaIgnored = false;          // If true, the alpha channel can be ignored.
+    bool opaque = false;                // If true, the alpha channel can be ignored.
 
     RenderSurface() = default;
-
-    RenderSurface(const RenderSurface* rhs)
-    {
-        data = rhs->data;
-        stride = rhs->stride;
-        w = rhs->w;
-        h = rhs->h;
-        cs = rhs->cs;
-        channelSize = rhs->channelSize;
-        premultiplied = rhs->premultiplied;
-        alphaIgnored = rhs->alphaIgnored;
-    }
-
-    void setup(pixel_t* data, uint32_t stride, uint32_t w, uint32_t h, uint8_t channelSize, ColorSpace cs, bool alphaIgnored = false)
-    {
-        this->data = data;
-        this->stride = stride;
-        this->w = w;
-        this->h = h;
-        this->channelSize = channelSize;
-        this->cs = cs;
-        this->premultiplied = (cs == ColorSpace::ABGR8888 || cs == ColorSpace::ARGB8888);
-        this->alphaIgnored = alphaIgnored;
-    }
+    RenderSurface(const RenderSurface* rhs);
+    void setup(pixel_t* data, uint32_t stride, uint32_t w, uint32_t h, uint8_t channelSize, ColorSpace cs);
 };
 
 struct RenderCompositor
@@ -528,6 +506,47 @@ struct RenderEffectGaussianBlur : RenderEffect
     }
 };
 
+struct RenderEffectMotionBlur : RenderEffect
+{
+    float distance;
+    float angle;
+    uint8_t quality;
+
+    // computes the transformed blur offset and quality-based sample count
+    bool update(const Matrix& transform, Point& offset, int& samples)
+    {
+        valid = false;
+
+        // transform the local blur vector, without translating it.
+        auto radian = tvg::deg2rad(angle);
+        auto vx = distance * cosf(radian);
+        auto vy = distance * sinf(radian);
+        offset = {transform.e11 * vx + transform.e12 * vy, transform.e21 * vx + transform.e22 * vy};
+
+        // avoid spurious one-pixel expansion at exact cardinal angles.
+        if (fabsf(offset.x) < 0.001f) offset.x = 0.0f;
+        if (fabsf(offset.y) < 0.001f) offset.y = 0.0f;
+        auto length = std::max(fabsf(offset.x), fabsf(offset.y));
+        if (tvg::zero(length)) return false;
+
+        // confirm the samples count; Uniform midpoint samples, including the original position.
+        auto density = 0.25f + quality * 0.0075f;
+        samples = 2 * int(std::min(128.0f, ceilf(length * density * 0.5f))) + 1;
+        valid = true;
+        return true;
+    }
+
+    static RenderEffectMotionBlur* gen(va_list& args)
+    {
+        auto inst = new RenderEffectMotionBlur;
+        inst->distance = std::max(0.0f, float(va_arg(args, double)));
+        inst->angle = fmod((float)va_arg(args, double), 180.0f);
+        inst->quality = std::min(va_arg(args, int), 100);
+        inst->type = SceneEffect::MotionBlur;
+        return inst;
+    }
+};
+
 struct RenderEffectDropShadow : RenderEffect
 {
     uint8_t color[4];  //rgba
@@ -705,6 +724,8 @@ static inline bool MASK_REGION_MERGING(MaskMethod method)
 static inline uint8_t CHANNEL_SIZE(ColorSpace cs)
 {
     switch(cs) {
+        case ColorSpace::XBGR8888:
+        case ColorSpace::XRGB8888:
         case ColorSpace::ABGR8888:
         case ColorSpace::ABGR8888S:
         case ColorSpace::ARGB8888:

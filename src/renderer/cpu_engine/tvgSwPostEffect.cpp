@@ -20,14 +20,7 @@
  * SOFTWARE.
  */
 
-#include "tvgMath.h"
-#include "tvgSwCommon.h"
-
-#if defined(THORVG_AVX_SUPPORT)
-    #include <immintrin.h>
-#elif defined(THORVG_NEON_SUPPORT)
-    #include <arm_neon.h>
-#endif
+#include "tvgSwRasterCore.h"
 
 /************************************************************************/
 /* Gaussian Blur Implementation                                         */
@@ -41,12 +34,6 @@ struct SwGaussianBlur
     int extends;
 };
 
-static inline int _gaussianEdgeWrap(int end, int idx)
-{
-    auto r = idx % (end + 1);
-    return (r < 0) ? (end + 1) + r : r;
-}
-
 static inline int _gaussianEdgeExtend(int end, int idx)
 {
     if (idx < 0) return 0;
@@ -54,14 +41,6 @@ static inline int _gaussianEdgeExtend(int end, int idx)
     return idx;
 }
 
-template<int border>
-static inline int _gaussianRemap(int end, int idx)
-{
-    if (border == 1) return _gaussianEdgeWrap(end, idx);
-    return _gaussianEdgeExtend(end, idx);
-}
-
-template<int border = 0>
 static void _gaussianFilter(uint8_t* dst, uint8_t* src, int32_t stride, int32_t w, int32_t h, const RenderRegion& bbox, int32_t dimension, bool flipped)
 {
     if (flipped) {
@@ -73,98 +52,14 @@ static void _gaussianFilter(uint8_t* dst, uint8_t* src, int32_t stride, int32_t 
     }
 
     auto iarr = 1.0f / (dimension + dimension + 1);
-    auto end = w - 1;
 
     #pragma omp parallel for
     for (int y = 0; y < h; ++y) {
-        auto p = y * stride;
-        auto i = p * 4;                 //current index
-        auto l = -(dimension + 1);      //left index
-        auto r = dimension;             //right index
-#if defined(THORVG_AVX_SUPPORT)
-        auto acc = _mm_setzero_si128();
-        const auto zero = _mm_setzero_si128();
-        const auto scale = _mm_set1_ps(iarr);
-
-        for (int x = l; x < r; ++x) {
-            auto id = (_gaussianRemap<border>(end, x) + p) * 4;
-            uint32_t pixel;
-            memcpy(&pixel, src + id, sizeof(pixel));
-            acc = _mm_add_epi32(acc, _mm_cvtepu8_epi32(_mm_cvtsi32_si128(pixel)));
-        }
-
-        for (int x = 0; x < w; ++x, ++r, ++l) {
-            auto rid = (_gaussianRemap<border>(end, r) + p) * 4;
-            auto lid = (_gaussianRemap<border>(end, l) + p) * 4;
-            uint32_t right, left;
-            memcpy(&right, src + rid, sizeof(right));
-            memcpy(&left, src + lid, sizeof(left));
-            auto added = _mm_cvtepu8_epi32(_mm_cvtsi32_si128(right));
-            auto removed = _mm_cvtepu8_epi32(_mm_cvtsi32_si128(left));
-            acc = _mm_add_epi32(acc, _mm_sub_epi32(added, removed));
-            auto values = _mm_cvttps_epi32(_mm_mul_ps(_mm_cvtepi32_ps(acc), scale));
-            auto packed = _mm_packus_epi16(_mm_packs_epi32(values, zero), zero);
-            auto pixel = static_cast<uint32_t>(_mm_cvtsi128_si32(packed));
-            memcpy(dst + i, &pixel, sizeof(pixel));
-            i += 4;
-        }
-#elif defined(THORVG_NEON_SUPPORT)
-        auto acc = vdupq_n_s32(0);
-        const auto scale = vdupq_n_f32(iarr);
-
-        for (int x = l; x < r; ++x) {
-            auto id = (_gaussianRemap<border>(end, x) + p) * 4;
-            uint32_t pixel;
-            memcpy(&pixel, src + id, sizeof(pixel));
-            auto channels = vmovl_u16(vget_low_u16(vmovl_u8(vcreate_u8(pixel))));
-            acc = vaddq_s32(acc, vreinterpretq_s32_u32(channels));
-        }
-
-        for (int x = 0; x < w; ++x, ++r, ++l) {
-            auto rid = (_gaussianRemap<border>(end, r) + p) * 4;
-            auto lid = (_gaussianRemap<border>(end, l) + p) * 4;
-            uint32_t right, left;
-            memcpy(&right, src + rid, sizeof(right));
-            memcpy(&left, src + lid, sizeof(left));
-            auto added = vmovl_u16(vget_low_u16(vmovl_u8(vcreate_u8(right))));
-            auto removed = vmovl_u16(vget_low_u16(vmovl_u8(vcreate_u8(left))));
-            acc = vaddq_s32(acc, vsubq_s32(vreinterpretq_s32_u32(added), vreinterpretq_s32_u32(removed)));
-            auto values = vcvtq_s32_f32(vmulq_f32(vcvtq_f32_s32(acc), scale));
-            auto packed = vmovn_u16(vcombine_u16(vqmovun_s32(values), vdup_n_u16(0)));
-            auto pixel = vget_lane_u32(vreinterpret_u32_u8(packed), 0);
-            memcpy(dst + i, &pixel, sizeof(pixel));
-            i += 4;
-        }
-#else
-        int acc[4] = {0, 0, 0, 0};      //sliding accumulator
-
-        //initial accumulation
-        for (int x = l; x < r; ++x) {
-            auto id = (_gaussianRemap<border>(end, x) + p) * 4;
-            acc[0] += src[id++];
-            acc[1] += src[id++];
-            acc[2] += src[id++];
-            acc[3] += src[id];
-        }
-        //perform filtering
-        for (int x = 0; x < w; ++x, ++r, ++l) {
-            auto rid = (_gaussianRemap<border>(end, r) + p) * 4;
-            auto lid = (_gaussianRemap<border>(end, l) + p) * 4;
-            acc[0] += src[rid++] - src[lid++];
-            acc[1] += src[rid++] - src[lid++];
-            acc[2] += src[rid++] - src[lid++];
-            acc[3] += src[rid] - src[lid];
-            //ignored rounding for the performance. It should be originally: acc[idx] * iarr + 0.5f
-            dst[i++] = static_cast<uint8_t>(acc[0] * iarr);
-            dst[i++] = static_cast<uint8_t>(acc[1] * iarr);
-            dst[i++] = static_cast<uint8_t>(acc[2] * iarr);
-            dst[i++] = static_cast<uint8_t>(acc[3] * iarr);
-        }
-#endif
+        rasterGaussianFilterRow(dst + y * stride * 4, src + y * stride * 4, w, dimension, iarr);
     }
 }
 
-void _gaussianXYFlip(uint32_t* src, uint32_t* dst, int32_t stride, int32_t w, int32_t h, const RenderRegion& bbox, bool flipped)
+static void _gaussianXYFlip(uint32_t* src, uint32_t* dst, int32_t stride, int32_t w, int32_t h, const RenderRegion& bbox, bool flipped)
 {
     constexpr int32_t BLOCK = 8;  // experimental decision
 
@@ -185,54 +80,20 @@ void _gaussianXYFlip(uint32_t* src, uint32_t* dst, int32_t stride, int32_t w, in
             auto p = &in[y * stride];
             auto q = &out[y];
             auto by = std::min(h, y + BLOCK) - y;
-            if (bx == BLOCK && by == BLOCK) {
-#if defined(THORVG_AVX_SUPPORT)
-                for (int32_t i = 0; i < BLOCK; i += 4) {
-                    for (int32_t j = 0; j < BLOCK; j += 4) {
-                        auto s = p + i + j * stride;
-                        auto d = q + i * stride + j;
-                        auto r0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s));
-                        auto r1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + stride));
-                        auto r2 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 2 * stride));
-                        auto r3 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 3 * stride));
-                        auto t0 = _mm_unpacklo_epi32(r0, r1);
-                        auto t1 = _mm_unpackhi_epi32(r0, r1);
-                        auto t2 = _mm_unpacklo_epi32(r2, r3);
-                        auto t3 = _mm_unpackhi_epi32(r2, r3);
-                        _mm_storeu_si128(reinterpret_cast<__m128i*>(d), _mm_unpacklo_epi64(t0, t2));
-                        _mm_storeu_si128(reinterpret_cast<__m128i*>(d + stride), _mm_unpackhi_epi64(t0, t2));
-                        _mm_storeu_si128(reinterpret_cast<__m128i*>(d + 2 * stride), _mm_unpacklo_epi64(t1, t3));
-                        _mm_storeu_si128(reinterpret_cast<__m128i*>(d + 3 * stride), _mm_unpackhi_epi64(t1, t3));
-                    }
-                }
-#elif defined(THORVG_NEON_SUPPORT)
-                for (int32_t i = 0; i < BLOCK; i += 4) {
-                    for (int32_t j = 0; j < BLOCK; j += 4) {
-                        auto s = p + i + j * stride;
-                        auto d = q + i * stride + j;
-                        auto r0 = vld1q_u32(s);
-                        auto r1 = vld1q_u32(s + stride);
-                        auto r2 = vld1q_u32(s + 2 * stride);
-                        auto r3 = vld1q_u32(s + 3 * stride);
-                        auto t0 = vtrnq_u32(r0, r1);
-                        auto t1 = vtrnq_u32(r2, r3);
-                        vst1q_u32(d, vcombine_u32(vget_low_u32(t0.val[0]), vget_low_u32(t1.val[0])));
-                        vst1q_u32(d + stride, vcombine_u32(vget_low_u32(t0.val[1]), vget_low_u32(t1.val[1])));
-                        vst1q_u32(d + 2 * stride, vcombine_u32(vget_high_u32(t0.val[0]), vget_high_u32(t1.val[0])));
-                        vst1q_u32(d + 3 * stride, vcombine_u32(vget_high_u32(t0.val[1]), vget_high_u32(t1.val[1])));
-                    }
-                }
-#else
-                for (int32_t i = 0; i < bx; ++i) {
-                    for (int32_t j = 0; j < by; ++j)
-                        q[i * stride + j] = p[j * stride + i];
-                }
-#endif
+#if defined(THORVG_AVX_SUPPORT) || defined(THORVG_NEON_SUPPORT)
+            if (bx == BLOCK && by == BLOCK && rasterGaussianXYFlipBlock) {
+                rasterGaussianXYFlipBlock(p, q, stride);
                 continue;
             }
-            for (int32_t i = 0; i < bx; ++i) {
-                for (int32_t j = 0; j < by; ++j)
-                    q[i * stride + j] = p[j * stride + i];
+#endif
+            for (int32_t xx = 0; xx < bx; ++xx) {
+                for (int32_t yy = 0; yy < by; ++yy) {
+                    *q = *p;
+                    p += stride;
+                    ++q;
+                }
+                p += 1 - by * stride;
+                q += stride - by;
             }
         }
     }
@@ -305,7 +166,7 @@ bool effectGaussianBlur(SwCompositor* cmp, SwSurface* surface, const RenderEffec
     auto back = buffer.buf32;
     auto swapped = false;
 
-    TVGLOG("SW_ENGINE", "GaussianFilter region(%d, %d, %d, %d) params(%f %d %d), level(%d)", bbox.min.x, bbox.min.y, bbox.max.x, bbox.max.y, params->sigma, params->direction, params->border, data->level);
+    TVGLOG("SW_ENGINE", "GaussianFilter region(%d, %d, %d, %d) params(%f %d), level(%d)", bbox.min.x, bbox.min.y, bbox.max.x, bbox.max.y, params->sigma, params->direction, data->level);
 
     /* It is best to take advantage of the Gaussian blur’s separable property
        by dividing the process into two passes. horizontal and vertical.
@@ -337,6 +198,122 @@ bool effectGaussianBlur(SwCompositor* cmp, SwSurface* surface, const RenderEffec
 
     if (swapped) std::swap(cmp->image.buf8, buffer.buf8);
 
+    return true;
+}
+
+/************************************************************************/
+/* Motion Blur Implementation                                           */
+/************************************************************************/
+
+struct SwMotionBlur
+{
+    static constexpr int MAX_TAPS = 4 * 257;
+
+    // integer pixel offsets with accumulated bilinear weights scaled by 65536.
+    struct Tap
+    {
+        int32_t x, y;
+        uint32_t weight;
+    } taps[MAX_TAPS];
+
+    int count;  // sample count, before merging bilinear taps
+    int tapCount;
+    SwPoint extent;
+};
+
+void effectMotionBlurUpdate(RenderEffectMotionBlur* params, const Matrix& transform)
+{
+    Point offset;
+    int samples;
+    if (!params->update(transform, offset, samples)) return;
+
+    if (!params->rd) params->rd = tvg::malloc<SwMotionBlur>(sizeof(SwMotionBlur));
+    auto data = static_cast<SwMotionBlur*>(params->rd);
+    data->extent = {int32_t(ceilf(fabsf(offset.x) * 0.5f)), int32_t(ceilf(fabsf(offset.y) * 0.5f))};
+    data->count = samples;
+
+    // flatten bilinear samples into nonzero integer taps.
+    data->tapCount = 0;
+    for (int i = 0; i < data->count; ++i) {
+        auto pt = offset * ((i + 0.5f) / data->count - 0.5f);
+        auto x = int32_t(floorf(pt.x));
+        auto y = int32_t(floorf(pt.y));
+        auto fx = uint32_t((pt.x - x) * 256.0f + 0.5f);
+        auto fy = uint32_t((pt.y - y) * 256.0f + 0.5f);
+        uint32_t weights[] = {(256 - fx) * (256 - fy), fx * (256 - fy), (256 - fx) * fy, fx * fy};
+        for (int k = 0; k < 4; ++k) {
+            if (weights[k]) data->taps[data->tapCount++] = {x + (k & 1), y + (k >> 1), weights[k]};
+        }
+    }
+
+    // merge repeated coordinates without changing the total integer weight.
+    std::qsort(data->taps, data->tapCount, sizeof(SwMotionBlur::Tap), [](const void* lhs, const void* rhs) {
+        auto a = static_cast<const SwMotionBlur::Tap*>(lhs);
+        auto b = static_cast<const SwMotionBlur::Tap*>(rhs);
+        if (a->y != b->y) return (a->y > b->y) ? 1 : -1;
+        return (a->x > b->x) - (a->x < b->x);
+    });
+    int merged = 0;
+    for (int i = 0; i < data->tapCount; ++i) {
+        auto& tap = data->taps[i];
+        if (merged > 0 && data->taps[merged - 1].x == tap.x && data->taps[merged - 1].y == tap.y) {
+            data->taps[merged - 1].weight += tap.weight;
+        } else {
+            data->taps[merged++] = tap;
+        }
+    }
+    data->tapCount = merged;
+    params->valid = true;
+}
+
+bool effectMotionBlurRegion(RenderEffectMotionBlur* params)
+{
+    auto data = static_cast<SwMotionBlur*>(params->rd);
+    params->extend = {{-data->extent.x, -data->extent.y}, {data->extent.x, data->extent.y}};
+    return true;
+}
+
+bool effectMotionBlur(SwCompositor* cmp, SwSurface* surface, const RenderEffectMotionBlur* params)
+{
+    auto& buffer = surface->compositor->image;
+    auto data = static_cast<SwMotionBlur*>(params->rd);
+    auto& bbox = cmp->bbox;
+    auto stride = cmp->image.stride;
+    auto w = bbox.max.x - bbox.min.x;
+    auto h = bbox.max.y - bbox.min.y;
+    auto divisor = uint64_t(data->count) * 65536;
+    auto src = cmp->image.buf32 + bbox.min.y * stride + bbox.min.x;
+    auto dst = buffer.buf32 + bbox.min.y * stride + bbox.min.x;
+
+    #pragma omp parallel for
+    for (int32_t y = 0; y < h; ++y) {
+        // Y clamping and row addressing are shared by all pixels in this row.
+        const uint32_t* tapRows[SwMotionBlur::MAX_TAPS];
+        for (int i = 0; i < data->tapCount; ++i) {
+            auto sy = _gaussianEdgeExtend(h - 1, y + data->taps[i].y);
+            tapRows[i] = src + sy * stride;
+        }
+        // Accumulate weighted taps with X coordinates clamped to the row edges.
+        // Each sample contributes 65536 total weight; normalize with rounding.
+        auto row = (uint8_t*)(dst + y * stride);
+        for (int32_t x = 0; x < w; ++x) {
+            uint64_t acc[4] = {};
+            for (int i = 0; i < data->tapCount; ++i) {
+                auto& tap = data->taps[i];
+                auto sx = _gaussianEdgeExtend(w - 1, x + tap.x);
+                auto pixel = (uint8_t*)(tapRows[i] + sx);
+                // Filter premultiplied channels together to preserve alpha.
+                for (int c = 0; c < 4; ++c) {
+                    acc[c] += uint64_t(pixel[c]) * tap.weight;
+                }
+            }
+            for (int c = 0; c < 4; ++c) {
+                row[x * 4 + c] = uint8_t((acc[c] + divisor / 2) / divisor);
+            }
+        }
+    }
+
+    std::swap(cmp->image.buf8, buffer.buf8);
     return true;
 }
 
@@ -445,7 +422,7 @@ static void _dropShadowNoFilter(SwImage* dimg, SwImage* simg, const RenderRegion
 
     // TODO: openmp optimization?
     for (auto y = 0; y < (bbox.max.y - bbox.min.y); ++y) {
-        rasterTranslucentPixel32(dst, src, bbox.max.x - bbox.min.x, 255);
+        rasterTranslucentPixels(dst, src, bbox.max.x - bbox.min.x, 255);
         src += sstride;
         dst += dstride;
     }
@@ -461,8 +438,8 @@ static void _dropShadowShift(uint32_t* dst, uint32_t* src, int dstride, int sstr
 
     // TODO: openmp optimization?
     for (auto y = 0; y < size.h; ++y) {
-        if (direct) rasterTranslucentPixel32(dst, src, size.w, opacity);
-        else rasterPixel32(dst, src, size.w, opacity);
+        if (direct) rasterTranslucentPixels(dst, src, size.w, opacity);
+        else rasterSolidPixels(dst, src, size.w, opacity);
         src += sstride;
         dst += dstride;
     }
@@ -579,7 +556,7 @@ bool effectDropShadow(SwCompositor* cmp, SwSurface* surface[2], const RenderEffe
 
     // TODO: openmp optimization?
     for (auto y = 0; y < h; ++y) {
-        rasterTranslucentPixel32(d, s, w, 255);
+        rasterTranslucentPixels(d, s, w, 255);
         s += buffer[0]->stride;
         d += cmp->image.stride;
     }

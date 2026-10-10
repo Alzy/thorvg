@@ -222,7 +222,19 @@ void GlComposeTask::run(GlStateCache& state)
     state.clearDepth(0.0);
     state.depthMask(GL_TRUE);
 
-    GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    if (partial) {
+        // Partial rendering keeps the colors outside of the regions. All draws use depths below 1.0
+        // with GL_GREATER, so the maximum depth rejects any draw outside of the regions.
+        state.clearDepth(1.0);
+        GL_CHECK(glClear(GL_STENCIL_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+        state.clearDepth(0.0);
+        ARRAY_FOREACH(p, *partial) {
+            state.scissor(p->sx(), fbo->height - p->max.y, p->sw(), p->sh());
+            GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+        }
+    } else {
+        GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    }
     state.depthMask(GL_FALSE);
     state.viewport(0, 0, renderWidth, renderHeight);
     state.scissor(0, 0, renderWidth, renderHeight);
@@ -565,10 +577,10 @@ void GlEffectDropShadowTask::run(GlStateCache& state)
 }
 
 /************************************************************************/
-/* GlEffectColorTransformTask Class Implementation                      */
+/* GlEffectTask Class Implementation                                    */
 /************************************************************************/
 
-void GlEffectColorTransformTask::run(GlStateCache& state)
+void GlEffectTask::run(GlStateCache& state)
 {
     const auto width = dstFbo->width;
     const auto height = dstFbo->height;
@@ -583,7 +595,7 @@ void GlEffectColorTransformTask::run(GlStateCache& state)
     GL_CHECK(glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST));
     state.bindFramebuffer(GL_FRAMEBUFFER, dstFbo->fbo);
 
-    // run transform
+    // run the single-pass effect
     state.disable(GL_BLEND);
     state.depthFunc(GL_ALWAYS);
     GlRenderTask::run(state);

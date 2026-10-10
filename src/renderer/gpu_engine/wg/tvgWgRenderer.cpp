@@ -150,7 +150,7 @@ void WgRenderer::release()
 
     // clear render data paint pools
     mPaintPool.release(mContext);
-    mEffectParamsPool.release(mContext);
+    mEffectPool.release(mContext);
 
     // clear render  pool
     mRenderTargetPool.release(mContext);
@@ -199,25 +199,29 @@ void WgRenderer::clearTargets()
     if (surface) wgpuSurfaceUnconfigure(surface);
     targetTexture = nullptr;
     surface = nullptr;
-    mTargetSurface.stride = 0;
-    mTargetSurface.w = 0;
-    mTargetSurface.h = 0;
-
+    mSurface.stride = 0;
+    mSurface.w = 0;
+    mSurface.h = 0;
 }
 
-void WgRenderer::surfaceConfigure(WGPUSurface surface, WgContext& context, uint32_t width, uint32_t height, ColorSpace cs)
+void WgRenderer::surfaceConfigure(RenderSurface& rsurface, WGPUSurface wsurface, WgContext& context)
 {
-    this->surface = surface;
+    this->surface = wsurface;
 
     // setup surface configuration
     WGPUSurfaceConfiguration surfaceConfig{
         .device = context.device,
         .format = context.format,
         .usage = WGPUTextureUsage_RenderAttachment,
-        .width = width,
-        .height = height,
+        .width = rsurface.w,
+        .height = rsurface.h,
 #ifdef __EMSCRIPTEN__
-        .alphaMode = WGPUCompositeAlphaMode_Premultiplied,  // for v1.0 backward compat. this can be removed with old target() api.
+        // for v1.0 backward compat. this can be removed with old target() api.
+        .alphaMode = rsurface.opaque ? WGPUCompositeAlphaMode_Opaque : WGPUCompositeAlphaMode_Premultiplied,
+#else
+        .alphaMode = rsurface.opaque ? WGPUCompositeAlphaMode_Opaque : WGPUCompositeAlphaMode_Auto,
+#endif
+#ifdef __EMSCRIPTEN__
         .presentMode = WGPUPresentMode_Fifo
 #elif defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__) || (defined(_WIN32) && !defined(__CYGWIN__))
         // Use Immediate only where it is known to be supported on desktop surfaces.
@@ -230,14 +234,14 @@ void WgRenderer::surfaceConfigure(WGPUSurface surface, WgContext& context, uint3
 
     // safe-guard for the system compatibility
     if (context.adapter) {
-        auto premultiplied = (cs == ColorSpace::ABGR8888);
-        auto alphaMode = premultiplied ? WGPUCompositeAlphaMode_Premultiplied : WGPUCompositeAlphaMode_Unpremultiplied;
+        auto premultiplied = (rsurface.cs != ColorSpace::ABGR8888S);
+        auto alphaMode = rsurface.opaque ? WGPUCompositeAlphaMode_Opaque : (premultiplied ? WGPUCompositeAlphaMode_Premultiplied : WGPUCompositeAlphaMode_Unpremultiplied);
         WGPUSurfaceCapabilities capabilities;
-        if (wgpuSurfaceGetCapabilities(surface, context.adapter, &capabilities) == WGPUStatus_Success) {
+        if (wgpuSurfaceGetCapabilities(wsurface, context.adapter, &capabilities) == WGPUStatus_Success) {
             for (size_t i = 0; i < capabilities.alphaModeCount; ++i) {
                 if (capabilities.alphaModes[i] == alphaMode) {
                     surfaceConfig.alphaMode = alphaMode;
-                    mTargetSurface.premultiplied = premultiplied;
+                    rsurface.premultiplied = premultiplied;
                     break;
                 }
             }
@@ -245,7 +249,7 @@ void WgRenderer::surfaceConfigure(WGPUSurface surface, WgContext& context, uint3
         }
     }
 
-    wgpuSurfaceConfigure(surface, &surfaceConfig);
+    wgpuSurfaceConfigure(wsurface, &surfaceConfig);
 }
 
 RenderData WgRenderer::prepare(const RenderShape& rshape, RenderData data, const Matrix& transform, const Array<RenderData>& clips, uint8_t opacity, RenderUpdateFlag flags, bool clipper)
@@ -260,7 +264,7 @@ RenderData WgRenderer::prepare(const RenderShape& rshape, RenderData data, const
     if (flags & RenderUpdateFlag::Transform) shape->transform = transform;
 
     // update paint settings
-    shape->update(rshape, vport, shape->shape.setting.update(mTargetSurface.cs, opacity), shape->stroke.setting.update(mTargetSurface.cs, opacity), opacity);
+    shape->update(rshape, vport, shape->shape.setting.update(mSurface.cs, opacity), shape->stroke.setting.update(mSurface.cs, opacity), opacity);
 
     // shape
     if (shape->shape.setting.valid) {
@@ -327,7 +331,7 @@ bool WgRenderer::preRender()
 
     // create root compose settings
     WgCompose* compose = new WgCompose();
-    compose->aabb = { { 0, 0 }, { (int32_t)mTargetSurface.w, (int32_t)mTargetSurface.h } };
+    compose->aabb = {{0, 0}, {(int32_t)mSurface.w, (int32_t)mSurface.h}};
     compose->blend = BlendMethod::Normal;
     compose->method = MaskMethod::None;
     compose->opacity = 255;
@@ -381,6 +385,7 @@ bool WgRenderer::postRender()
     WGPUCommandEncoder commandEncoder = mContext.createCommandEncoder();
 
     // run rendering (all the fun is here)
+    sceneTaskRoot->clearBuffer = mClearBuffer;
     sceneTaskRoot->run(mContext, mCompositor, commandEncoder);
 
     // execute and release command encoder
@@ -442,13 +447,13 @@ bool WgRenderer::blend(BlendMethod method)
 
 ColorSpace WgRenderer::colorSpace()
 {
-    return mTargetSurface.cs;
+    return mSurface.cs;
 }
 
 
 const RenderSurface* WgRenderer::mainSurface()
 {
-    return &mTargetSurface;
+    return &mSurface;
 }
 
 
@@ -456,7 +461,7 @@ bool WgRenderer::clear()
 {
     if (mContext.invalid()) return false;
 
-    //TODO: clear the current target buffer only if clear() is called
+    mClearBuffer = true;
     return true;
 }
 
@@ -485,18 +490,22 @@ bool WgRenderer::sync()
         auto dstTextureView = mContext.createTextureView(dstTexture);
         auto commandEncoder = mContext.createCommandEncoder();
         // show root offscreen buffer
-        mCompositor.blit(mContext, commandEncoder, &mRenderTargetRoot, dstTextureView, mTargetSurface.premultiplied);
+        mCompositor.blit(mContext, commandEncoder, &mRenderTargetRoot, dstTextureView, mSurface.premultiplied, mClearBuffer);
         mContext.submitCommandEncoder(commandEncoder);
         mContext.releaseCommandEncoder(commandEncoder);
         mContext.releaseTextureView(dstTextureView);
     }
+
+    mClearBuffer = false;
 
     return true;
 }
 
 Result WgRenderer::target(const WgCanvas::Context& ctx, void* target, uint32_t w, uint32_t h, ColorSpace cs, int type)
 {
-    if (cs != ColorSpace::ABGR8888 && cs != ColorSpace::ABGR8888S) return Result::NonSupport;
+    auto opaque = (cs == ColorSpace::XBGR8888);
+    if (cs != ColorSpace::ABGR8888 && cs != ColorSpace::ABGR8888S && !opaque) return Result::NonSupport;
+    if (opaque && type != 0) return Result::InvalidArguments;
 
     if (!ctx.instance || !ctx.device || !target) {
         release();
@@ -505,31 +514,35 @@ Result WgRenderer::target(const WgCanvas::Context& ctx, void* target, uint32_t w
 
     if (w == 0 || h == 0) return Result::InvalidArguments;
 
+    if (opaque) cs = ColorSpace::ABGR8888;  // Opaque surface composition uses the internal ABGR format.
+
     // context has been changed, need to recreate all instances
     if ((mContext.device != ctx.device) || (mContext.instance != ctx.instance) || mContext.adapter != ctx.adapter) {
         release();
         mContext.initialize(ctx);
-        mRenderTargetPool.initialize(mContext, w, h);
+        mRenderTargetPool.initialize(w, h);
         mRenderTargetRoot.initialize(mContext, w, h);
         mCompositor.initialize(mContext, w, h);
     // update render targets dimensions
-    } else if ((mTargetSurface.w != w) || (mTargetSurface.h != h) || (type == 0 ? (surface != (WGPUSurface)target) : (targetTexture != (WGPUTexture)target))) {
+    } else if ((mSurface.w != w) || (mSurface.h != h) || (type == 0 ? (surface != (WGPUSurface)target) : (targetTexture != (WGPUTexture)target))) {
         mRenderTargetPool.release(mContext);
         mRenderTargetRoot.release(mContext);
         clearTargets();
-        mRenderTargetPool.initialize(mContext, w, h);
+        mRenderTargetPool.initialize(w, h);
         mRenderTargetRoot.initialize(mContext, w, h);
         mCompositor.resize(mContext, w, h);
     }
 
-    mTargetSurface.stride = w;
-    mTargetSurface.w = w;
-    mTargetSurface.h = h;
-    mTargetSurface.cs = cs;
-    mTargetSurface.premultiplied = true;  // TODO: by default for v1 backward compat. properly addressed later v2 by aligning with actual alpha mode.
+    mSurface.stride = w;
+    mSurface.w = w;
+    mSurface.h = h;
+    // Keep alpha for internal composition; opaque mode only affects surface presentation.
+    mSurface.cs = cs;
+    mSurface.premultiplied = true;  // TODO: by default for v1 backward compat. properly addressed later v2 by aligning with actual alpha mode.
+    mSurface.opaque = opaque;
 
     // configure surface (must be called after context creation)
-    if (type == 0) surfaceConfigure((WGPUSurface)target, mContext, w, h, cs);
+    if (type == 0) surfaceConfigure(mSurface, (WGPUSurface)target, mContext);
     else targetTexture = (WGPUTexture)target;
 
     return Result::Success;
@@ -612,13 +625,13 @@ bool WgRenderer::beginComposite(RenderCompositor* cmp, MaskMethod method, uint8_
 bool WgRenderer::endComposite(RenderCompositor* cmp)
 {
     // pop targets and scenes from render tree
-    mRenderTargetPool.free(mContext, mRenderTargetStack.last());
+    mRenderTargetPool.pool.push(mRenderTargetStack.last());
     mSceneTaskStack.pop();
     mRenderTargetStack.pop();
     // in a case of masked target we must pop mask targets and scenes also
     WgCompose* compose = (WgCompose*)cmp;
     if (compose->masked) {
-        mRenderTargetPool.free(mContext, mRenderTargetStack.last());
+        mRenderTargetPool.pool.push(mRenderTargetStack.last());
         mSceneTaskStack.pop();
         mRenderTargetStack.pop();
     }
@@ -628,19 +641,21 @@ bool WgRenderer::endComposite(RenderCompositor* cmp)
 
 void WgRenderer::prepare(RenderEffect* effect, const Matrix& transform)
 {
-    if (!effect->rd) effect->rd = mEffectParamsPool.allocate(mContext);
-    auto effectParams = (WgRenderEffectParams*)effect->rd;
+    if (!effect->rd) effect->rd = mEffectPool.allocate(mContext);
+    auto rdata = (WgRenderEffect*)effect->rd;
 
     if (effect->type == SceneEffect::GaussianBlur) {
-        effectParams->update(mContext, (RenderEffectGaussianBlur*)effect, transform);
+        rdata->update(mContext, (RenderEffectGaussianBlur*)effect, transform);
     } else if (effect->type == SceneEffect::DropShadow) {
-        effectParams->update(mContext, (RenderEffectDropShadow*)effect, transform);
+        rdata->update(mContext, (RenderEffectDropShadow*)effect, transform);
     } else if (effect->type == SceneEffect::Fill) {
-        effectParams->update(mContext, (RenderEffectFill*)effect);
+        rdata->update(mContext, (RenderEffectFill*)effect);
     } else if (effect->type == SceneEffect::Tint) {
-        effectParams->update(mContext, (RenderEffectTint*)effect);
+        rdata->update(mContext, (RenderEffectTint*)effect);
     } else if (effect->type == SceneEffect::Tritone) {
-        effectParams->update(mContext, (RenderEffectTritone*)effect);
+        rdata->update(mContext, (RenderEffectTritone*)effect);
+    } else if (effect->type == SceneEffect::MotionBlur) {
+        rdata->update(mContext, (RenderEffectMotionBlur*)effect, transform);
     } else {
         TVGERR("WG_ENGINE", "Missing effect type? = %d", (int) effect->type);
         return;
@@ -650,25 +665,30 @@ void WgRenderer::prepare(RenderEffect* effect, const Matrix& transform)
 
 bool WgRenderer::region(RenderEffect* effect)
 {
+    auto rdata = (WgRenderEffect*)effect->rd;
+
     if (effect->type == SceneEffect::GaussianBlur) {
         auto gaussian = (RenderEffectGaussianBlur*)effect;
-        auto effectParams = (WgRenderEffectParams*)gaussian->rd;
         if (gaussian->direction != 2) {
-            gaussian->extend.min.x = -effectParams->extend;
-            gaussian->extend.max.x = +effectParams->extend;
+            gaussian->extend.min.x = -rdata->extend;
+            gaussian->extend.max.x = +rdata->extend;
         }
         if (gaussian->direction != 1) {
-            gaussian->extend.min.y = -effectParams->extend;
-            gaussian->extend.max.y = +effectParams->extend;
+            gaussian->extend.min.y = -rdata->extend;
+            gaussian->extend.max.y = +rdata->extend;
         }
         return true;
     } else if (effect->type == SceneEffect::DropShadow) {
         auto dropShadow = (RenderEffectDropShadow*)effect;
-        auto effectParams = (WgRenderEffectParams*)dropShadow->rd;
-        dropShadow->extend.min.x = -std::ceil(effectParams->extend + std::abs(effectParams->offset.x));
-        dropShadow->extend.min.y = -std::ceil(effectParams->extend + std::abs(effectParams->offset.y));
-        dropShadow->extend.max.x = +std::floor(effectParams->extend + std::abs(effectParams->offset.x));
-        dropShadow->extend.max.y = +std::floor(effectParams->extend + std::abs(effectParams->offset.y));
+        dropShadow->extend.min.x = -std::ceil(rdata->extend + std::abs(rdata->offset.x));
+        dropShadow->extend.min.y = -std::ceil(rdata->extend + std::abs(rdata->offset.y));
+        dropShadow->extend.max.x = +std::floor(rdata->extend + std::abs(rdata->offset.x));
+        dropShadow->extend.max.y = +std::floor(rdata->extend + std::abs(rdata->offset.y));
+        return true;
+    } else if (effect->type == SceneEffect::MotionBlur) {
+        auto x = int32_t(ceilf(fabsf(rdata->offset.x) * 0.5f));
+        auto y = int32_t(ceilf(fabsf(rdata->offset.y) * 0.5f));
+        effect->extend = {{-x, -y}, {x, y}};
         return true;
     }
     return false;
@@ -678,15 +698,15 @@ bool WgRenderer::region(RenderEffect* effect)
 bool WgRenderer::render(RenderCompositor* cmp, const RenderEffect* effect, TVG_UNUSED bool direct)
 {
     auto sceneTask = mSceneTaskStack.last();
-    sceneTask->effect = effect;
+    sceneTask->effects.push(effect);
     return true;
 }
 
 
 void WgRenderer::dispose(RenderEffect* effect)
 {
-    auto effectParams = (WgRenderEffectParams*)effect->rd;
-    mEffectParamsPool.free(mContext, effectParams);
+    if (!effect->rd) return;
+    mEffectPool.free(mContext, (WgRenderEffect*)effect->rd);
     effect->rd = nullptr;
 };
 

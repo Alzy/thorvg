@@ -18,7 +18,6 @@
 #include "./vp8li.h"
 #include "../dsp/dsp.h"
 #include "../dsp/lossless.h"
-#include "../dsp/yuv.h"
 #include "../utils/huffman.h"
 #include "../utils/utils.h"
 
@@ -501,116 +500,6 @@ static int EmitRows(WEBP_CSP_MODE colorspace,
 }
 
 //------------------------------------------------------------------------------
-// Export to YUVA
-
-// TODO(skal): should be in yuv.c
-static void ConvertToYUVA(const uint32_t* const src, int width, int y_pos,
-                          const WebPDecBuffer* const output) {
-  const WebPYUVABuffer* const buf = &output->u.YUVA;
-  // first, the luma plane
-  {
-    int i;
-    uint8_t* const y = buf->y + y_pos * buf->y_stride;
-    for (i = 0; i < width; ++i) {
-      const uint32_t p = src[i];
-      y[i] = VP8RGBToY((p >> 16) & 0xff, (p >> 8) & 0xff, (p >> 0) & 0xff,
-                       YUV_HALF);
-    }
-  }
-
-  // then U/V planes
-  {
-    uint8_t* const u = buf->u + (y_pos >> 1) * buf->u_stride;
-    uint8_t* const v = buf->v + (y_pos >> 1) * buf->v_stride;
-    const int uv_width = width >> 1;
-    int i;
-    for (i = 0; i < uv_width; ++i) {
-      const uint32_t v0 = src[2 * i + 0];
-      const uint32_t v1 = src[2 * i + 1];
-      // VP8RGBToU/V expects four accumulated pixels. Hence we need to
-      // scale r/g/b value by a factor 2. We just shift v0/v1 one bit less.
-      const int r = ((v0 >> 15) & 0x1fe) + ((v1 >> 15) & 0x1fe);
-      const int g = ((v0 >>  7) & 0x1fe) + ((v1 >>  7) & 0x1fe);
-      const int b = ((v0 <<  1) & 0x1fe) + ((v1 <<  1) & 0x1fe);
-      if (!(y_pos & 1)) {  // even lines: store values
-        u[i] = VP8RGBToU(r, g, b, YUV_HALF << 2);
-        v[i] = VP8RGBToV(r, g, b, YUV_HALF << 2);
-      } else {             // odd lines: average with previous values
-        const int tmp_u = VP8RGBToU(r, g, b, YUV_HALF << 2);
-        const int tmp_v = VP8RGBToV(r, g, b, YUV_HALF << 2);
-        // Approximated average-of-four. But it's an acceptable diff.
-        u[i] = (u[i] + tmp_u + 1) >> 1;
-        v[i] = (v[i] + tmp_v + 1) >> 1;
-      }
-    }
-    if (width & 1) {       // last pixel
-      const uint32_t v0 = src[2 * i + 0];
-      const int r = (v0 >> 14) & 0x3fc;
-      const int g = (v0 >>  6) & 0x3fc;
-      const int b = (v0 <<  2) & 0x3fc;
-      if (!(y_pos & 1)) {  // even lines
-        u[i] = VP8RGBToU(r, g, b, YUV_HALF << 2);
-        v[i] = VP8RGBToV(r, g, b, YUV_HALF << 2);
-      } else {             // odd lines (note: we could just skip this)
-        const int tmp_u = VP8RGBToU(r, g, b, YUV_HALF << 2);
-        const int tmp_v = VP8RGBToV(r, g, b, YUV_HALF << 2);
-        u[i] = (u[i] + tmp_u + 1) >> 1;
-        v[i] = (v[i] + tmp_v + 1) >> 1;
-      }
-    }
-  }
-  // Lastly, store alpha if needed.
-  if (buf->a != NULL) {
-    int i;
-    uint8_t* const a = buf->a + y_pos * buf->a_stride;
-    for (i = 0; i < width; ++i) a[i] = (src[i] >> 24);
-  }
-}
-
-static int ExportYUVA(const VP8LDecoder* const dec, int y_pos) {
-  WebPRescaler* const rescaler = dec->rescaler;
-  uint32_t* const src = (uint32_t*)rescaler->dst;
-  const int dst_width = rescaler->dst_width;
-  int num_lines_out = 0;
-  while (WebPRescalerHasPendingOutput(rescaler)) {
-    WebPRescalerExportRow(rescaler, 0);
-    WebPMultARGBRow(src, dst_width, 1);
-    ConvertToYUVA(src, dst_width, y_pos, dec->output_);
-    ++y_pos;
-    ++num_lines_out;
-  }
-  return num_lines_out;
-}
-
-static int EmitRescaledRowsYUVA(const VP8LDecoder* const dec,
-                                uint8_t* in, int in_stride, int mb_h) {
-  int num_lines_in = 0;
-  int y_pos = dec->last_out_row_;
-  while (num_lines_in < mb_h) {
-    const int lines_left = mb_h - num_lines_in;
-    const int needed_lines = WebPRescaleNeededLines(dec->rescaler, lines_left);
-    WebPMultARGBRows(in, in_stride, dec->rescaler->src_width, needed_lines, 0);
-    WebPRescalerImport(dec->rescaler, lines_left, in, in_stride);
-    num_lines_in += needed_lines;
-    in += needed_lines * in_stride;
-    y_pos += ExportYUVA(dec, y_pos);
-  }
-  return y_pos;
-}
-
-static int EmitRowsYUVA(const VP8LDecoder* const dec,
-                        const uint8_t* in, int in_stride,
-                        int mb_w, int num_rows) {
-  int y_pos = dec->last_out_row_;
-  while (num_rows-- > 0) {
-    ConvertToYUVA((const uint32_t*)in, mb_w, y_pos, dec->output_);
-    in += in_stride;
-    ++y_pos;
-  }
-  return y_pos;
-}
-
-//------------------------------------------------------------------------------
 // Cropping.
 
 // Sets io->mb_y, io->mb_h & io->mb_w according to start row, end row and
@@ -712,21 +601,15 @@ static void ProcessRows(VP8LDecoder* const dec, int row) {
       // Nothing to output (this time).
     } else {
       const WebPDecBuffer* const output = dec->output_;
-      if (output->colorspace < MODE_YUV) {  // convert to RGBA
-        const WebPRGBABuffer* const buf = &output->u.RGBA;
-        uint8_t* const rgba = buf->rgba + dec->last_out_row_ * buf->stride;
-        const int num_rows_out = io->use_scaling ?
-            EmitRescaledRowsRGBA(dec, rows_data, in_stride, io->mb_h,
-                                 rgba, buf->stride) :
-            EmitRows(output->colorspace, rows_data, in_stride,
-                     io->mb_w, io->mb_h, rgba, buf->stride);
-        // Update 'last_out_row_'.
-        dec->last_out_row_ += num_rows_out;
-      } else {                              // convert to YUVA
-        dec->last_out_row_ = io->use_scaling ?
-            EmitRescaledRowsYUVA(dec, rows_data, in_stride, io->mb_h) :
-            EmitRowsYUVA(dec, rows_data, in_stride, io->mb_w, io->mb_h);
-      }
+      const WebPRGBABuffer* const buf = &output->u.RGBA;
+      uint8_t* const rgba = buf->rgba + dec->last_out_row_ * buf->stride;
+      const int num_rows_out = io->use_scaling ?
+          EmitRescaledRowsRGBA(dec, rows_data, in_stride, io->mb_h,
+                               rgba, buf->stride) :
+          EmitRows(output->colorspace, rows_data, in_stride,
+                   io->mb_w, io->mb_h, rgba, buf->stride);
+      // Update 'last_out_row_'.
+      dec->last_out_row_ += num_rows_out;
       assert(dec->last_out_row_ <= output->height);
     }
   }
@@ -964,26 +847,6 @@ static int DecodeAlphaData(VP8LDecoder* const dec, uint8_t* const data,
   return ok;
 }
 
-static void SaveState(VP8LDecoder* const dec, int last_pixel) {
-  assert(dec->incremental_);
-  dec->saved_br_ = dec->br_;
-  dec->saved_last_pixel_ = last_pixel;
-  if (dec->hdr_.color_cache_size_ > 0) {
-    VP8LColorCacheCopy(&dec->hdr_.color_cache_, &dec->hdr_.saved_color_cache_);
-  }
-}
-
-static void RestoreState(VP8LDecoder* const dec) {
-  assert(dec->br_.eos_);
-  dec->status_ = VP8_STATUS_SUSPENDED;
-  dec->br_ = dec->saved_br_;
-  dec->last_pixel_ = dec->saved_last_pixel_;
-  if (dec->hdr_.color_cache_size_ > 0) {
-    VP8LColorCacheCopy(&dec->hdr_.saved_color_cache_, &dec->hdr_.color_cache_);
-  }
-}
-
-#define SYNC_EVERY_N_ROWS 8  // minimum number of rows between check-points
 static int DecodeImageData(VP8LDecoder* const dec, uint32_t* const data,
                            int width, int height, int last_row,
                            ProcessRowsFunc process_func) {
@@ -998,7 +861,6 @@ static int DecodeImageData(VP8LDecoder* const dec, uint32_t* const data,
   uint32_t* const src_last = data + width * last_row;  // Last pixel to decode
   const int len_code_limit = NUM_LITERAL_CODES + NUM_LENGTH_CODES;
   const int color_cache_limit = len_code_limit + hdr->color_cache_size_;
-  int next_sync_row = dec->incremental_ ? row : 1 << 24;
   VP8LColorCache* const color_cache =
       (hdr->color_cache_size_ > 0) ? &hdr->color_cache_ : NULL;
   const int mask = hdr->huffman_mask_;
@@ -1008,10 +870,6 @@ static int DecodeImageData(VP8LDecoder* const dec, uint32_t* const data,
 
   while (src < src_last) {
     int code;
-    if (row >= next_sync_row) {
-      SaveState(dec, (int)(src - data));
-      next_sync_row = row + SYNC_EVERY_N_ROWS;
-    }
     // Only update when changing tile. Note we could use this test:
     // if "((((prev_col ^ col) | prev_row ^ row)) > mask)" -> tile changed
     // but that's actually slower and needs storing the previous col/row.
@@ -1094,9 +952,7 @@ static int DecodeImageData(VP8LDecoder* const dec, uint32_t* const data,
     assert(br->eos_ == VP8LIsEndOfStream(br));
   }
 
-  if (dec->incremental_ && br->eos_ && src < src_end) {
-    RestoreState(dec);
-  } else if (!br->eos_) {
+  if (!br->eos_) {
     // Process the remaining rows corresponding to last row-block.
     if (process_func != NULL) {
       process_func(dec, row);
@@ -1104,8 +960,7 @@ static int DecodeImageData(VP8LDecoder* const dec, uint32_t* const data,
     dec->status_ = VP8_STATUS_OK;
     dec->last_pixel_ = (int)(src - data);  // end-of-scan marker
   } else {
-    // if not incremental, and we are past the end of buffer (eos_=1), then this
-    // is a real bitstream error.
+    // we are past the end of buffer (eos_=1): this is a real bitstream error.
     goto Error;
   }
   return 1;
@@ -1215,7 +1070,6 @@ static void ClearMetadata(VP8LMetadata* const hdr) {
   tvg::free(hdr->huffman_tables_);
   VP8LHtreeGroupsFree(hdr->htree_groups_);
   VP8LColorCacheClear(&hdr->color_cache_);
-  VP8LColorCacheClear(&hdr->saved_color_cache_);
   InitMetadata(hdr);
 }
 
@@ -1536,10 +1390,7 @@ int VP8LDecodeImage(VP8LDecoder* const dec) {
     dec->output_ = params->output;
     assert(dec->output_ != NULL);
 
-    if (!WebPIoInitFromOptions(params->options, io, MODE_BGRA)) {
-      dec->status_ = VP8_STATUS_INVALID_PARAM;
-      goto Err;
-    }
+    WebPIoInitFrame(io);
 
     if (!AllocateInternalBuffers32b(dec, io->width)) goto Err;
 
@@ -1548,16 +1399,6 @@ int VP8LDecodeImage(VP8LDecoder* const dec) {
     if (io->use_scaling || WebPIsPremultipliedMode(dec->output_->colorspace)) {
       // need the alpha-multiply functions for premultiplied output or rescaling
       WebPInitAlphaProcessing();
-    }
-    if (dec->incremental_) {
-      if (dec->hdr_.color_cache_size_ > 0 &&
-          dec->hdr_.saved_color_cache_.colors_ == NULL) {
-        if (!VP8LColorCacheInit(&dec->hdr_.saved_color_cache_,
-                                dec->hdr_.color_cache_.hash_bits_)) {
-          dec->status_ = VP8_STATUS_OUT_OF_MEMORY;
-          goto Err;
-        }
-      }
     }
     dec->state_ = READ_DATA;
   }

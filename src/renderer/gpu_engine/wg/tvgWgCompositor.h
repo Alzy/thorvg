@@ -113,7 +113,7 @@ public:
     void resize(WgContext& context, uint32_t width, uint32_t height);
 
     // render passes workflow
-    void beginRenderPassMS(WGPUCommandEncoder encoder, WgRenderTarget* target, bool clear, WGPUColor clearColor = { 0.0, 0.0, 0.0, 0.0 });
+    void beginRenderPassMS(WGPUCommandEncoder encoder, WgRenderTarget* target, bool clearBuffer);
     void beginRenderPass(WGPUCommandEncoder encoder, WgRenderTarget* target);
     void endRenderPass();
 
@@ -138,14 +138,15 @@ public:
     void composeScene(WgContext& context, WgRenderTarget* src, WgRenderTarget* mask, WgCompose* compose);
 
     // blit render target to texture view (f.e. screen buffer)
-    void blit(WgContext& context, WGPUCommandEncoder encoder, WgRenderTarget* src, WGPUTextureView dstView, bool premultiplied);
+    void blit(WgContext& context, WGPUCommandEncoder encoder, WgRenderTarget* src, WGPUTextureView dstView, bool premultiplied, bool clearBuffer);
 
     // effects
-    bool gaussianBlur(WgContext& context, WgRenderTarget* dst, const RenderEffectGaussianBlur* params, const WgCompose* compose);
-    bool dropShadow(WgContext& context, WgRenderTarget* dst, const RenderEffectDropShadow* params, const WgCompose* compose);
-    bool fillEffect(WgContext& context, WgRenderTarget* dst, const RenderEffectFill* params, const WgCompose* compose);
-    bool tintEffect(WgContext& context, WgRenderTarget* dst, const RenderEffectTint* params, const WgCompose* compose);
-    bool tritoneEffect(WgContext& context, WgRenderTarget* dst, const RenderEffectTritone* params, const WgCompose* compose);
+    bool gaussianBlur(WgContext& context, WgRenderTarget* dst, const RenderEffectGaussianBlur* blur, const WgCompose* compose);
+    bool dropShadow(WgContext& context, WgRenderTarget* dst, const RenderEffectDropShadow* shadow, const WgCompose* compose);
+    bool fillEffect(WgContext& context, WgRenderTarget* dst, const RenderEffectFill* fill, const WgCompose* compose);
+    bool tintEffect(WgContext& context, WgRenderTarget* dst, const RenderEffectTint* tint, const WgCompose* compose);
+    bool tritoneEffect(WgContext& context, WgRenderTarget* dst, const RenderEffectTritone* tritone, const WgCompose* compose);
+    bool motionBlur(WgContext& context, WgRenderTarget* dst, const RenderEffectMotionBlur* params, const WgCompose* compose);
 };
 
 #endif // _TVG_WG_COMPOSITOR_H_

@@ -90,8 +90,9 @@ private:
     void releaseSurfaceTexture();
 
     void clearTargets();
-    void surfaceConfigure(WGPUSurface surface, WgContext& context, uint32_t width, uint32_t height, ColorSpace cs);
+    void surfaceConfigure(RenderSurface& rsurface, WGPUSurface wsurface, WgContext& context);
 
+    RenderSurface mSurface;  // main surface
     WgRenderTarget mRenderTargetRoot;
     Array<WgCompose*> mCompositorList;
     Array<WgRenderTarget*> mRenderTargetStack;
@@ -101,11 +102,10 @@ private:
     WgStencilBatch mStencilBatch;
     WgRenderTargetPool mRenderTargetPool;
     WgPaintPool mPaintPool;
-    WgRenderEffectParamsPool mEffectParamsPool;
+    WgRenderEffectPool mEffectPool;
     WgTextureMgr mTextures;
     WgContext mContext;
     WgCompositor mCompositor;
-    RenderSurface mTargetSurface;
     BlendMethod mBlendMethod = BlendMethod::Normal;
 
     // disposable data list
@@ -116,6 +116,8 @@ private:
     WGPUTexture targetTexture{};
     WGPUSurfaceTexture surfaceTexture{};
     WGPUSurface surface{};
+
+    bool mClearBuffer{};
 };
 
 #endif /* _TVG_WG_RENDERER_H_ */
