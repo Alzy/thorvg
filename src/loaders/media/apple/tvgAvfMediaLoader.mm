@@ -450,7 +450,7 @@ bool AvfMediaLoader::read()
     surface.h = static_cast<uint32_t>(h);
     surface.stride = surface.w;
     surface.channelSize = sizeof(uint32_t);
-    surface.alphaIgnored = true;
+    surface.opaque = true;
 
     // Prime the first frame so Picture can render immediately after load().
     return _readStillFrame(*this, 0.0f) && sync();
@@ -473,7 +473,7 @@ bool AvfMediaLoader::sync()
     if (!surface.data) surface.data = tvg::malloc<pixel_t>(size);
     memcpy(surface.data, frame, size);
     surface.cs = ColorSpace::ARGB8888S;   // rasterConvertCS() can update this.
-    surface.premultiplied = false;        // rasterPremultiply() can update this.
+    surface.premultiplied = false;        // rasterPremultiplySurface() can update this.
     frameUpdated = false;
 
     return true;
