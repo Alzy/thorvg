@@ -34,11 +34,11 @@
 // WgGradientTexture
 //***********************************************************************
 
-void WgGradientTexture::update(WgContext& context, const Fill* fill, FillSpread& currentSpread)
+bool WgGradientTexture::update(WgContext& context, const Fill* fill, FillSpread& currentSpread)
 {
     // compute gradient data
     WgShaderTypeGradientData gradientData;
-    gradientData.update(fill);
+    auto opaque = gradientData.update(fill);
     // allocate new texture handle
     auto bytesPerRow = WG_TEXTURE_GRADIENT_SIZE * sizeof(uint32_t);
     bool texHandleChanged = context.allocateTexture(texture, WG_TEXTURE_GRADIENT_SIZE, 1, WGPUTextureFormat_RGBA8Unorm, gradientData.data, bytesPerRow, bytesPerRow);
@@ -59,6 +59,7 @@ void WgGradientTexture::update(WgContext& context, const Fill* fill, FillSpread&
         bindGroup = context.layouts.createBindGroupTexSampled(sampler, textureView);
         currentSpread = spread;
     }
+    return opaque;
 };
 
 void WgGradientTexture::release(WgContext& context)
@@ -82,7 +83,7 @@ uint8_t WgRenderSettings::update(tvg::ColorSpace cs, uint8_t opacity)
 void WgRenderSettings::update(WgContext& context, const Fill* fill, const Matrix* transform, bool updateColorRamp)
 {
     settings.gradient.update(fill, transform);
-    if (updateColorRamp) gradientData.update(context, fill, spread);
+    if (updateColorRamp) opaque = gradientData.update(context, fill, spread);
     if (fill->type() == Type::LinearGradient)
         fillType = WgRenderSettingsType::Linear;
     else if (fill->type() == Type::RadialGradient)
@@ -173,7 +174,7 @@ void WgShape::update(const RenderShape& rshape, const Matrix& transform, RenderU
             // Drawable thin fills are tessellated as a minimal-width stroke.
             if (optPathThin && tvg::zero(rshape.strokeWidth())) {
                 WgStroker stroker(&shape.mesh, MIN_WG_STROKE_WIDTH, StrokeCap::Butt, StrokeJoin::Bevel);
-                stroker.run(optPath);
+                stroker.run(optPath, true);
                 bbox = stroker.getBBox();
                 shape.setting.opacityMultiplier = MIN_WG_STROKE_ALPHA;
             } else {
@@ -204,6 +205,7 @@ void WgShape::update(const RenderShape& rshape, const Matrix& transform, RenderU
             auto& dashed = RenderPath::scratch();
             if (gpuStrokeDash(rshape, dashed, nullptr)) stroker.run(dashed);
             else stroker.run(optStrokePath);
+            strokeOverlapFree = stroker.overlapFree;
             stroke.setting.opacityMultiplier = 1.0f;
             if (stroke.mesh.ibuffer.empty()) {
                 stroke.mesh.clear();
@@ -212,7 +214,7 @@ void WgShape::update(const RenderShape& rshape, const Matrix& transform, RenderU
                 stroke.bbox = bbox;
                 stroke.bboxMesh.bbox(bbox.min, bbox.max);
                 auto strokeBounds = gpuTransformBounds(stroker.bounds(), transform);
-                expand({{(float)strokeBounds.min.x, (float)strokeBounds.min.y}, {(float)strokeBounds.max.x, (float)strokeBounds.max.y}});
+                expand({{(float)strokeBounds.xMin, (float)strokeBounds.yMin}, {(float)strokeBounds.xMax, (float)strokeBounds.yMax}});
             }
         }
     }
@@ -281,86 +283,91 @@ void WgImage::release(WgContext& context)
 }
 
 //***********************************************************************
-// WgRenderEffectParams
+// WgRenderEffect
 //***********************************************************************
 
-void WgRenderEffectParams::update(WgContext& context, WgShaderTypeEffectParams& effectParams)
+void WgRenderEffect::update(WgContext& context, WgShaderTypeEffectParams& params)
 {
-    if (context.allocateBufferUniform(bufferParams, &effectParams.params, sizeof(effectParams.params))) {
+    if (context.allocateBufferUniform(bufferParams, &params.params, sizeof(params.params))) {
         context.layouts.releaseBindGroup(bindGroupParams);
         bindGroupParams = context.layouts.createBindGroupBuffer1Un(bufferParams);
     }
 }
 
-void WgRenderEffectParams::update(WgContext& context, RenderEffectGaussianBlur* gaussian, const Matrix& transform)
+void WgRenderEffect::update(WgContext& context, RenderEffectGaussianBlur* gaussian, const Matrix& transform)
 {
-    WgShaderTypeEffectParams effectParams;
-    if (!effectParams.update(gaussian, transform)) return;
-    update(context, effectParams);
-    extend = effectParams.extend;
+    WgShaderTypeEffectParams params;
+    if (!params.update(gaussian, transform)) return;
+    update(context, params);
+    extend = params.extend;
 }
 
-void WgRenderEffectParams::update(WgContext& context, RenderEffectDropShadow* dropShadow, const Matrix& transform)
+void WgRenderEffect::update(WgContext& context, RenderEffectDropShadow* dropShadow, const Matrix& transform)
 {
-    WgShaderTypeEffectParams effectParams;
-    if (!effectParams.update(dropShadow, transform)) return;
-    update(context, effectParams);
-    extend = effectParams.extend;
-    offset = effectParams.offset;
+    WgShaderTypeEffectParams params;
+    if (!params.update(dropShadow, transform)) return;
+    update(context, params);
+    extend = params.extend;
+    offset = params.offset;
 }
 
-void WgRenderEffectParams::update(WgContext& context, RenderEffectFill* fill)
+void WgRenderEffect::update(WgContext& context, RenderEffectFill* fill)
 {
-    assert(fill);
-    WgShaderTypeEffectParams effectParams;
-    if (!effectParams.update(fill)) return;
-    update(context, effectParams);
+    WgShaderTypeEffectParams params;
+    if (!params.update(fill)) return;
+    update(context, params);
 }
 
-void WgRenderEffectParams::update(WgContext& context, RenderEffectTint* tint)
+void WgRenderEffect::update(WgContext& context, RenderEffectTint* tint)
 {
-    assert(tint);
-    WgShaderTypeEffectParams effectParams;
-    if (!effectParams.update(tint)) return;
-    update(context, effectParams);
+    WgShaderTypeEffectParams params;
+    if (!params.update(tint)) return;
+    update(context, params);
 }
 
-void WgRenderEffectParams::update(WgContext& context, RenderEffectTritone* tritone)
+void WgRenderEffect::update(WgContext& context, RenderEffectTritone* tritone)
 {
-    assert(tritone);
-    WgShaderTypeEffectParams effectParams;
-    if (!effectParams.update(tritone)) return;
-    update(context, effectParams);
+    WgShaderTypeEffectParams params;
+    if (!params.update(tritone)) return;
+    update(context, params);
 }
 
-void WgRenderEffectParams::release(WgContext& context)
+void WgRenderEffect::update(WgContext& context, RenderEffectMotionBlur* motion, const Matrix& transform)
+{
+    WgShaderTypeEffectParams params;
+    if (!params.update(motion, transform)) return;
+    update(context, params);
+    offset = params.offset;
+}
+
+void WgRenderEffect::release(WgContext& context)
 {
     context.releaseBuffer(bufferParams);
     context.layouts.releaseBindGroup(bindGroupParams);
 }
 
 //***********************************************************************
-// WgRenderDataColorsPool
+// WgRenderEffectPool
 //***********************************************************************
 
-WgRenderEffectParams* WgRenderEffectParamsPool::allocate(WgContext& context)
+WgRenderEffect* WgRenderEffectPool::allocate(WgContext& context)
 {
-    WgRenderEffectParams* rdata{};
+    WgRenderEffect* rdata{};
     if (mPool.count > 0) {
         rdata = mPool.pick();
     } else {
-        rdata = new WgRenderEffectParams();
+        rdata = new WgRenderEffect();
         mList.push(rdata);
     }
     return rdata;
 }
 
-void WgRenderEffectParamsPool::free(WgContext& context, WgRenderEffectParams* rdata)
+void WgRenderEffectPool::free(WgContext& context, WgRenderEffect* rdata)
 {
     if (rdata) mPool.push(rdata);
 }
 
-void WgRenderEffectParamsPool::release(WgContext& context)
+void WgRenderEffectPool::release(WgContext& context)
 {
     ARRAY_FOREACH(p, mList) {
         (*p)->release(context);

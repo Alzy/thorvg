@@ -404,12 +404,12 @@ struct LottieFont
 
     ~LottieFont()
     {
-        if (path) {
-            Text::unload(name);
-            tvg::free(b64src);
-        } else {
-            Text::load(name, nullptr, size, mime, false);
+        if (prepared) {
+            if (path) Text::unload(name);
+            else Text::load(name, nullptr, size, mime, false);
         }
+        // Prepared embedded data is owned by the font loader.
+        if (path || !prepared) tvg::free(b64src);
 
         ARRAY_FOREACH(p, chars) delete(*p);
         tvg::free(style);
@@ -428,11 +428,13 @@ struct LottieFont
     float ascent = 0.0f;
     Origin origin = Local;
     bool path = false;  // true if the b64src is path
+    bool prepared = false;
 
     void prepare()
     {
-        if (path) Text::load(b64src);
-        else TextImpl::load(name, b64src, size, mime, Ownership::Transfer);
+        if (prepared) return;
+        if (path) prepared = (Text::load(b64src) == Result::Success);
+        else prepared = (TextImpl::load(name, b64src, size, mime, Ownership::Transfer) == Result::Success);
     }
 };
 
@@ -464,6 +466,7 @@ private:
 
 public:
     LottieFloat firstMargin = 0.0f;
+    LottieInteger perpendicular = 0;
     LottieMask* mask;
     int8_t maskIdx = -1;
 
@@ -965,7 +968,7 @@ struct LottieImage : LottieObject
 #endif
     }
 
-    Picture* get();
+    Picture* get(const AssetResolver* resolver);
 };
 
 struct LottieAudio : LottieObject
@@ -1278,7 +1281,6 @@ struct LottieComposition
     }
 
     LottieRootLayer* root = nullptr;
-    char* version = nullptr;
     char* name = nullptr;
     float w, h;
     float frameRate;

@@ -163,6 +163,17 @@ TVG_API Tvg_Result tvg_canvas_sync(Tvg_Canvas canvas)
     return TVG_RESULT_INVALID_ARGUMENT;
 }
 
+TVG_API uint32_t tvg_canvas_get_dirty_regions_cnt(Tvg_Canvas canvas)
+{
+    if (canvas) return reinterpret_cast<const Canvas*>(canvas)->dirtyRegions();
+    return 0;
+}
+
+TVG_API Tvg_Result tvg_canvas_get_dirty_regions(Tvg_Canvas canvas, Tvg_Region* regions, uint32_t cnt)
+{
+    if (canvas) return (Tvg_Result) reinterpret_cast<const Canvas*>(canvas)->dirtyRegions(reinterpret_cast<Region*>(regions), cnt);
+    return TVG_RESULT_INVALID_ARGUMENT;
+}
 
 TVG_API Tvg_Result tvg_canvas_set_viewport(Tvg_Canvas canvas, int32_t x, int32_t y, int32_t w, int32_t h)
 {
@@ -667,16 +678,14 @@ TVG_API Tvg_Result tvg_picture_load_data(Tvg_Paint picture, const char *data, ui
     return TVG_RESULT_INVALID_ARGUMENT;
 }
 
-
-TVG_API Tvg_Result tvg_picture_set_asset_resolver(Tvg_Paint picture, Tvg_Picture_Asset_Resolver resolver, void* data)
+TVG_API Tvg_Result tvg_picture_set_asset_resolver(Tvg_Paint picture, Tvg_Picture_Asset_Resolver resolver, void* data, bool fallback)
 {
     if (!picture) return TVG_RESULT_INVALID_ARGUMENT;
-    if (!resolver) return (Tvg_Result) reinterpret_cast<Picture*>(picture)->resolver(nullptr, nullptr);
+    if (!resolver) return (Tvg_Result) reinterpret_cast<Picture*>(picture)->resolver(nullptr, nullptr, fallback);
     return (Tvg_Result) reinterpret_cast<Picture*>(picture)->resolver([resolver](Paint* paint, const char* src, void* data) -> bool {
         return resolver(reinterpret_cast<Tvg_Paint>(paint), src, data);
-    }, data);
+    }, data, fallback);
 }
-
 
 TVG_API Tvg_Result tvg_picture_set_size(Tvg_Paint picture, float w, float h)
 {
@@ -920,6 +929,11 @@ TVG_API Tvg_Result tvg_scene_add_effect_gaussian_blur(Tvg_Paint scene, double si
     return TVG_RESULT_INVALID_ARGUMENT;
 }
 
+TVG_API Tvg_Result tvg_scene_add_effect_motion_blur(Tvg_Paint scene, double distance, double angle, int quality)
+{
+    if (scene) return (Tvg_Result) reinterpret_cast<Scene*>(scene)->add(SceneEffect::MotionBlur, distance, angle, quality);
+    return TVG_RESULT_INVALID_ARGUMENT;
+}
 
 TVG_API Tvg_Result tvg_scene_add_effect_fill(Tvg_Paint scene, int r, int g, int b, int a)
 {
