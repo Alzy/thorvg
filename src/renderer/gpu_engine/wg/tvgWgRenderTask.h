@@ -73,28 +73,23 @@ struct WgImageBatchTask : WgRenderTask
 // task for scene rendering with blending, composition and effect
 struct WgSceneTask : WgRenderTask
 {
-    // parent scene (nullptr for root scene)
-    WgSceneTask* parent{};
-    // children can be shapes or scenes tasks
-    Array<WgRenderTask*> children;
-    // scene blend/compose targets
-    WgRenderTarget* renderTarget{};
-    WgRenderTarget* renderTargetMsk{};
-    WgRenderTarget* renderTargetDst{};
-    // scene blend/compose properties
-    WgCompose* compose{};
-    // scene effect properties
-    const RenderEffect* effect{};
+    WgSceneTask* parent{};           // parent scene (nullptr for root scene)
+    Array<WgRenderTask*> children;   // children can be shapes or scenes tasks
+    WgRenderTargetState targetState;
+    WgSceneTask* maskScene{};
+    WgSceneTask* dstScene{};
+    WgMesh composeMesh;
+    WgMesh effectMesh;
+    WgCompose* compose{};  // scene blend/compose properties
+    Array<const RenderEffect*> effects;
+    bool clearBuffer = true;
 
     WgSceneTask(WgRenderTarget* renderTarget, WgCompose* compose, WgSceneTask* parent) :
-        parent(parent), renderTarget(renderTarget), compose(compose) {}
-    // stage all resources used by the scene tree
+        parent(parent), targetState{renderTarget, compose->aabb}, compose(compose) {}
     void stage(WgCompositor& compositor) override;
-    // run all, including all shapes drawing, blending, composition and effect
     void run(WgContext& context, WgCompositor& compositor, WGPUCommandEncoder encoder) override;
-
     void runChildren(WgContext& context, WgCompositor& compositor, WGPUCommandEncoder encoder);
-    void runEffect(WgContext& context, WgCompositor& compositor, WGPUCommandEncoder encoder);
+    void runEffect(WgContext& context, WgCompositor& compositor, const RenderEffect* effect);
 };
 
 #endif  // _TVG_WG_RENDER_TASK_H_

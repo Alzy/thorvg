@@ -987,10 +987,10 @@ bool LottieParser::parseAssetSource(AssetSrc& src, const char* data, const char*
     auto typeLen = strlen(type);
     if (embedded && !strncmp(data, type, typeLen)) {
         auto mime = data + typeLen;
-        auto semi = strstr(mime, ";");
+        auto semi = strchr(mime, ';');
         if (!semi) return false;
         src.mimeType = duplicate(mime, semi - mime);
-        auto b64 = strstr(semi, ",");
+        auto b64 = strchr(semi, ',');
         if (!b64) return false;
         ++b64;
         src.size = b64Decode(b64, dlen - (b64 - data), &src.data);
@@ -1051,7 +1051,7 @@ LottieObject* LottieParser::parseAsset()
         else if (KEY_AS("sid")) sid = getString();
         else skip();
     }
-    if (data) {
+    if (data && !obj) {
         if (!strncmp(data, "data:image/", 11) || width != 0.0f || height != 0.0f) {
             obj = new LottieImage;
             parseImage(static_cast<LottieImage*>(obj), data, subPath, width, height, embedded);
@@ -1086,7 +1086,7 @@ void LottieParser::parseFontData(LottieFont* font, const char* data)
             TVGLOG("LOTTIE", "Not support the current font type!");
             return;
         }
-        auto b64Data = strstr(data, ",");
+        auto b64Data = strchr(data, ',');
         if (!b64Data) return;
         data = b64Data + 1;
         font->size = b64Decode(data, strlen(data), &font->b64src);
@@ -1114,7 +1114,6 @@ LottieFont* LottieParser::parseFont()
         else skip();
     }
 
-    font->prepare();
     return font;
 }
 
@@ -1249,11 +1248,7 @@ void LottieParser::parseTextRange(LottieText* text)
                 enterObject();
                 while (auto key = nextObjectKey()) {
                     if (KEY_AS("t")) selector->expressible = (bool) getInt();
-                    else if (KEY_AS("xe"))
-                    {
-                        parseProperty(selector->maxEase, selector);
-                        selector->interpolator = tvg::malloc<LottieInterpolator>(sizeof(LottieInterpolator));
-                    }
+                    else if (KEY_AS("xe")) parseProperty(selector->maxEase, selector);
                     else if (KEY_AS("ne")) parseProperty(selector->minEase, selector);
                     else if (KEY_AS("a")) parseProperty(selector->maxAmount, selector);
                     else if (KEY_AS("b")) selector->based = (LottieTextRange::Based) getInt();
@@ -1311,6 +1306,7 @@ void LottieParser::parseTextFollowPath(LottieText* text)
     do {
         if (KEY_AS("m")) text->follow->maskIdx = getInt();
         else if (KEY_AS("f")) parseProperty(text->follow->firstMargin);
+        else if (KEY_AS("p")) parseProperty(text->follow->perpendicular);
         else skip();
     } while ((key = nextObjectKey()));
 }
@@ -1733,28 +1729,22 @@ LottieProperty* LottieParser::parse(LottieSlot* slot)
 void LottieParser::captureSlots(const char* key)
 {
     tvg::free(slots);
+    slots = nullptr;
 
     // TODO: Replace with immediate parsing, once the slot spec is confirmed by the LAC
 
     auto begin = getPos();
     auto end = getPos();
     auto depth = 1;
-    auto invalid = true;
 
     //get slots string
-    while (++end) {
-        if (*end == '}') {
-            --depth;
-            if (depth == 0) {
-                invalid = false;
-                break;
-            }
-        } else if (*end == '{') {
-            ++depth;
-        }
+    while (depth > 0 && *end != '\0') {
+        ++end;
+        if (*end == '}') --depth;
+        else if (*end == '{') ++depth;
     }
 
-    if (invalid) {
+    if (depth > 0) {
         TVGERR("LOTTIE", "Invalid Slots!");
         skip();
         return;
@@ -1787,8 +1777,7 @@ bool LottieParser::parse()
     auto outPoint = 0.0f;
 
     while (auto key = nextObjectKey()) {
-        if (KEY_AS("v")) comp->version = getStringCopy();
-        else if (KEY_AS("fr")) comp->frameRate = getFloat();
+        if (KEY_AS("fr")) comp->frameRate = getFloat();
         else if (KEY_AS("ip")) inPoint = getFloat();
         else if (KEY_AS("op")) outPoint = getFloat();
         else if (KEY_AS("w")) comp->w = getFloat();

@@ -218,8 +218,11 @@ float LottieTextRange::factor(float frameNo, float totalLen, float idx)
     if (random > 0) {
         auto range = end - start;
         auto len = (rangeUnit == Unit::Percent) ? 100.0f : totalLen;
-        start = static_cast<float>(random % int(len - range));
-        end = start + range;
+        auto span = int(len - range);
+        if (span != 0) {
+            start = static_cast<float>(random % span);
+            end = start + range;
+        }
     }
 
     auto divisor = (rangeUnit == Unit::Percent) ? (100.0f / totalLen) : 1.0f;
@@ -282,8 +285,9 @@ float LottieTextRange::factor(float frameNo, float totalLen, float idx)
         if (minEase > 0.0f) out.x = minEase * 0.01f;
         else out.y = -minEase * 0.01f;
 
-        interpolator->set(nullptr, in, out);
-        f = interpolator->progress(f);
+        LottieInterpolator interpolator;
+        interpolator.set(nullptr, in, out);
+        f = interpolator.progress(f);
     }
     f = tvg::clamp(f, 0.0f, 1.0f);
 
@@ -294,7 +298,7 @@ float LottieTextRange::factor(float frameNo, float totalLen, float idx)
 /* LottieImage                                                          */
 /************************************************************************/
 
-Picture* LottieImage::get()
+Picture* LottieImage::get(const AssetResolver* resolver)
 {
     if (picture) return picture;
 
@@ -305,11 +309,16 @@ Picture* LottieImage::get()
     picture = Picture::gen();
     picture->ref();
 #endif
-    auto result = Result::Unknown;
-    if (asset.size > 0) result = picture->load(asset.data, asset.size, asset.mimeType);
-    else if (asset.external) result = picture->load(asset.path);
+    if (asset.size > 0) {
+        valid = (picture->load(asset.data, asset.size, asset.mimeType) == Result::Success);
+    } else if (asset.path) {
+        valid = resolver && !resolver->fallback && resolver->func(picture, asset.path, resolver->data);
+        if (!valid) {
+            if (asset.external) valid = (picture->load(asset.path) == Result::Success);
+            if (!valid && resolver && resolver->fallback) valid = resolver->func(picture, asset.path, resolver->data);
+        }
+    }
     picture->size(asset.width, asset.height);
-    valid = (result == Result::Success);
 
     return picture;
 }
@@ -692,7 +701,6 @@ LottieComposition::~LottieComposition()
     if (!initiated && root) Paint::rel(root->scene);
 
     delete (root);
-    tvg::free(version);
     tvg::free(name);
 
     ARRAY_FOREACH(p, interpolators) {

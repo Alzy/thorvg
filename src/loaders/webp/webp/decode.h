@@ -29,14 +29,7 @@ extern "C" {
 typedef struct WebPRGBABuffer WebPRGBABuffer;
 typedef struct WebPYUVABuffer WebPYUVABuffer;
 typedef struct WebPDecBuffer WebPDecBuffer;
-typedef struct WebPIDecoder WebPIDecoder;
 typedef struct WebPBitstreamFeatures WebPBitstreamFeatures;
-typedef struct WebPDecoderOptions WebPDecoderOptions;
-typedef struct WebPDecoderConfig WebPDecoderConfig;
-
-// Return the decoder's version number, packed in hexadecimal using 8bits for
-// each of major/minor/revision. E.g: v2.5.7 is 0x020507.
-WEBP_EXTERN(int) WebPGetDecoderVersion(void);
 
 // Retrieve basic header information: width, height.
 // This function will also validate the header and return 0 in
@@ -127,16 +120,14 @@ struct WebPYUVABuffer {              // view as YUVA
 struct WebPDecBuffer {
   WEBP_CSP_MODE colorspace;  // Colorspace.
   int width, height;         // Dimensions.
-  int is_external_memory;    // If true, 'internal_memory' pointer is not used.
   union {
     WebPRGBABuffer RGBA;
     WebPYUVABuffer YUVA;
   } u;                       // Nameless union of buffer parameters.
   uint32_t       pad[4];     // padding for later use
 
-  uint8_t* private_memory;   // Internally allocated memory (only when
-                             // is_external_memory is false). Should not be used
-                             // externally, but accessed via the buffer union.
+  uint8_t* private_memory;  // Internally allocated memory, accessed via
+                            // the buffer union.
 };
 
 // Internal, version-checked, entry point
@@ -167,37 +158,6 @@ typedef enum VP8StatusCode {
 } VP8StatusCode;
 
 //------------------------------------------------------------------------------
-// Advanced decoding parametrization
-//
-//  Code sample for using the advanced decoding API
-/*
-     // A) Init a configuration object
-     WebPDecoderConfig config;
-     CHECK(WebPInitDecoderConfig(&config));
-
-     // B) optional: retrieve the bitstream's features.
-     CHECK(WebPGetFeatures(data, data_size, &config.input) == VP8_STATUS_OK);
-
-     // C) Adjust 'config', if needed
-     config.no_fancy_upsampling = 1;
-     config.output.colorspace = MODE_BGRA;
-     // etc.
-
-     // Note that you can also make config.output point to an externally
-     // supplied memory buffer, provided it's big enough to store the decoded
-     // picture. Otherwise, config.output will just be used to allocate memory
-     // and store the decoded picture.
-
-     // D) Decode!
-     CHECK(WebPDecode(data, data_size, &config) == VP8_STATUS_OK);
-
-     // E) Decoded image is now in config.output (and config.output.u.RGBA)
-
-     // F) Reclaim memory allocated in config's object. It's safe to call
-     // this function even if the memory is external and wasn't allocated
-     // by WebPDecode().
-     WebPFreeDecBuffer(&config.output);
-*/
 
 // Features gathered from the bitstream
 struct WebPBitstreamFeatures {
@@ -221,27 +181,6 @@ struct WebPBitstreamFeatures {
 // VP8_STATUS_NOT_ENOUGH_DATA when more data is needed to retrieve the
 // features from headers. Returns error in other cases.
 WEBP_EXTERN(VP8StatusCode) WebPGetFeatures(const uint8_t*, size_t, WebPBitstreamFeatures*);
-
-// Decoding options
-struct WebPDecoderOptions {
-  int bypass_filtering;               // if true, skip the in-loop filtering
-  int no_fancy_upsampling;            // if true, use faster pointwise upsampler
-  int use_cropping;                   // if true, cropping is applied _first_
-  int crop_left, crop_top;            // top-left position for cropping.
-                                      // Will be snapped to even values.
-  int crop_width, crop_height;        // dimension of the cropping area
-  int use_scaling;                    // if true, scaling is applied _afterward_
-  int scaled_width, scaled_height;    // final resolution
-  int use_threads;                    // if true, use multi-threaded decoding
-  int dithering_strength;             // dithering strength (0=Off, 100=full)
-  int flip;                           // flip output vertically
-  int alpha_dithering_strength;       // alpha dithering strength in [0..100]
-
-  // Unused for now:
-  int force_rotation;                 // forced rotation (to be applied _last_)
-  int no_enhancement;                 // if true, discard enhancement layer
-  uint32_t pad[3];                    // padding for later use
-};
 
 #ifdef __cplusplus
 }    // extern "C"

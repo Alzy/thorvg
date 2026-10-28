@@ -47,7 +47,6 @@ bool LottieLoader::prepare()
         ScopedLock lock(key);
         comp = parser.comp;
     }
-    if (!comp) return false;
     if (parser.slots) {
         auto slotcode = gen(parser.slots, true);
         apply(slotcode, true);
@@ -147,8 +146,9 @@ Result LottieLoader::header()
         //framerate
         if (!strncmp(p, "\"fr\":", 5)) {
             p += 5;
-            auto e = strstr(p, ",");
-            if (!e) e = strstr(p, "}");
+            auto e = strchr(p, ',');
+            if (!e) e = strchr(p, '}');
+            if (!e) return Result::InvalidArguments;
             frameRate = toFloat(p, nullptr);
             p = e;
             continue;
@@ -157,8 +157,9 @@ Result LottieLoader::header()
         //start frame
         if (!strncmp(p, "\"ip\":", 5)) {
             p += 5;
-            auto e = strstr(p, ",");
-            if (!e) e = strstr(p, "}");
+            auto e = strchr(p, ',');
+            if (!e) e = strchr(p, '}');
+            if (!e) return Result::InvalidArguments;
             startFrame = toFloat(p, nullptr);
             p = e;
             continue;
@@ -167,8 +168,9 @@ Result LottieLoader::header()
         //end frame
         if (!strncmp(p, "\"op\":", 5)) {
             p += 5;
-            auto e = strstr(p, ",");
-            if (!e) e = strstr(p, "}");
+            auto e = strchr(p, ',');
+            if (!e) e = strchr(p, '}');
+            if (!e) return Result::InvalidArguments;
             endFrame = toFloat(p, nullptr);
             p = e;
             continue;
@@ -177,8 +179,9 @@ Result LottieLoader::header()
         //width
         if (!strncmp(p, "\"w\":", 4)) {
             p += 4;
-            auto e = strstr(p, ",");
-            if (!e) e = strstr(p, "}");
+            auto e = strchr(p, ',');
+            if (!e) e = strchr(p, '}');
+            if (!e) return Result::InvalidArguments;
             w = toFloat(p, nullptr);
             p = e;
             continue;
@@ -186,8 +189,9 @@ Result LottieLoader::header()
         //height
         if (!strncmp(p, "\"h\":", 4)) {
             p += 4;
-            auto e = strstr(p, ",");
-            if (!e) e = strstr(p, "}");
+            auto e = strchr(p, ',');
+            if (!e) e = strchr(p, '}');
+            if (!e) return Result::InvalidArguments;
             h = toFloat(p, nullptr);
             p = e;
             continue;

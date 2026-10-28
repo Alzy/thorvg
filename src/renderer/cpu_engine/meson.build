@@ -1,4 +1,4 @@
-# CPU vectorization is enabled only when simd is true and the target machine supports it.
+# SIMD compiler flags are restricted to the SIMD implementation.
 simd_flags = []
 
 if get_option('simd')
@@ -30,14 +30,19 @@ if get_option('simd')
             config_h.set10('THORVG_AVX_SUPPORT', true)
         endif
     # NEON
-    elif cpu_family == 'arm' or cpu_family == 'aarch64'
+    elif cpu_family == 'arm' or cpu_family == 'aarch64' or cpu_family == 'wasm32'
         candidate_flags = []
+        neon_type = 'neon-aarch'
         if cpu_family == 'arm'
             if cpp.get_id() == 'clang-cl'
                 candidate_flags = ['/clang:-mfpu=neon']
             elif cpp.get_id() != 'msvc'
                 candidate_flags = ['-mfpu=neon']
             endif
+            neon_type = 'neon-arm'
+        elif cpu_family == 'wasm32'
+            candidate_flags = ['-msimd128', '-mfpu=neon']
+            neon_type = 'neon-wasm'
         endif
 
         if cpp.compiles('''
@@ -48,7 +53,7 @@ if get_option('simd')
             }
         ''', args: candidate_flags, name: 'NEON raster support')
             simd_flags = candidate_flags
-            simd_type = cpu_family == 'arm' ? 'neon-arm' : 'neon-aarch'
+            simd_type = neon_type
             config_h.set10('THORVG_NEON_SUPPORT', true)
         endif
     endif
@@ -56,17 +61,16 @@ endif
 
 source_file = [
    'tvgSwCommon.h',
-   'tvgSwRasterC.h',
-   'tvgSwRasterAvx.h',
-   'tvgSwRasterNeon.h',
+   'tvgSwRasterCore.h',
    'tvgSwRasterTexmap.h',
+   'tvgSwRenderer.h',
    'tvgSwBlendOp.cpp',
    'tvgSwFill.cpp',
    'tvgSwImage.cpp',
    'tvgSwMemPool.cpp',
    'tvgSwPostEffect.cpp',
-   'tvgSwRenderer.h',
    'tvgSwRaster.cpp',
+   'tvgSwRasterCore.cpp',
    'tvgSwRenderer.cpp',
    'tvgSwRle.cpp',
    'tvgSwShape.cpp',
@@ -80,9 +84,22 @@ if openmp
     omp_dep = dependency('openmp')
 endif
 
+simd_dep = []
+if simd_type != 'none' and simd_type != 'unsupported'
+    simd_lib = static_library('thorvg-sw-simd',
+        'tvgSwRasterSimd.cpp',
+        include_directories : [headers, include_directories('../../common', '..')],
+        dependencies        : omp_dep,
+        cpp_args            : compiler_flags + simd_flags,
+        gnu_symbol_visibility : 'hidden',
+        override_options    : override_options + ['b_lto=false'],
+        pic                 : true
+    )
+    simd_dep = [declare_dependency(link_whole: simd_lib)]
+endif
+
 engine_dep += [declare_dependency(
     include_directories : include_directories('.'),
-    dependencies        : omp_dep,
-    compile_args        : simd_flags,
+    dependencies        : [omp_dep, simd_dep],
     sources             : source_file
 )]

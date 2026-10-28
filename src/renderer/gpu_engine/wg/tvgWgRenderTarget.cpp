@@ -22,6 +22,16 @@
 
 #include "tvgWgRenderTarget.h"
 
+static uint32_t _renderTargetSize(uint32_t value, uint32_t limit)
+{
+    uint32_t size = 1;
+    while (size < value && size < limit) {
+        if (size > limit / 2) return limit;
+        size <<= 1;
+    }
+    return size < limit ? size : limit;
+}
+
 void WgRenderTarget::initialize(WgContext& context, uint32_t width, uint32_t height)
 {
     this->width = width;
@@ -30,17 +40,25 @@ void WgRenderTarget::initialize(WgContext& context, uint32_t width, uint32_t hei
     textureMS = context.createTexAttachement(width, height, WGPUTextureFormat_RGBA8Unorm, 4);
     texView = context.createTextureView(texture);
     texViewMS = context.createTextureView(textureMS);
-    bindGroupRead = context.layouts.createBindGroupStrorage1RO(texView);
-    bindGroupWrite = context.layouts.createBindGroupStrorage1WO(texView);
-    bindGroupTexture = context.layouts.createBindGroupTexSampled(context.samplerNearestRepeat, texView);
+    bgRead = context.layouts.createBindGroupStrorage1RO(texView);
+    bgWrite = context.layouts.createBindGroupStrorage1WO(texView);
+    bgTexture = context.layouts.createBindGroupTexSampled(context.samplerNearestRepeat, texView);
 }
 
+WGPUBindGroup WgRenderTarget::getBindGroupTextureLinear(WgContext& context)
+{
+    if (!bgTextureLinear) {
+        bgTextureLinear = context.layouts.createBindGroupTexSampled(context.samplerLinearClamp, texView);
+    }
+    return bgTextureLinear;
+}
 
 void WgRenderTarget::release(WgContext& context)
 {
-    context.layouts.releaseBindGroup(bindGroupTexture);
-    context.layouts.releaseBindGroup(bindGroupWrite);
-    context.layouts.releaseBindGroup(bindGroupRead);
+    context.layouts.releaseBindGroup(bgTextureLinear);
+    context.layouts.releaseBindGroup(bgTexture);
+    context.layouts.releaseBindGroup(bgWrite);
+    context.layouts.releaseBindGroup(bgRead);
     context.releaseTextureView(texViewMS);
     context.releaseTexture(textureMS);
     context.releaseTextureView(texView);
@@ -53,32 +71,31 @@ void WgRenderTarget::release(WgContext& context)
 // render target pool
 //*****************************************************************************
 
-WgRenderTarget* WgRenderTargetPool::allocate(WgContext& context)
+WgRenderTarget* WgRenderTargetPool::allocate(WgContext& context, const RenderRegion& region)
 {
-    WgRenderTarget* renderTarget{};
-    if (pool.count > 0) {
-        renderTarget = pool.pick();
-    } else {
-        renderTarget = new WgRenderTarget;
-        renderTarget->initialize(context, width, height);
-        list.push(renderTarget);
+    auto targetWidth = _renderTargetSize(region.sw() > 1 ? region.sw() : 1, width);
+    auto targetHeight = _renderTargetSize(region.sh() > 1 ? region.sh() : 1, height);
+    for (uint32_t i = 0; i < pool.count; ++i) {
+        auto target = pool[i];
+        if (target->width != targetWidth || target->height != targetHeight) continue;
+        pool[i] = pool.last();
+        pool.pop();
+        return target;
     }
+
+    // TODO: Add an eviction policy to release unused cached resources.
+    auto renderTarget = new WgRenderTarget;
+    renderTarget->initialize(context, targetWidth, targetHeight);
+    list.push(renderTarget);
+
     return renderTarget;
-};
+}
 
-
-void WgRenderTargetPool::free(WgContext& context, WgRenderTarget* renderTarget)
-{
-    pool.push(renderTarget);
-};
-
-
-void WgRenderTargetPool::initialize(WgContext& context, uint32_t width, uint32_t height)
+void WgRenderTargetPool::initialize(uint32_t width, uint32_t height)
 {
     this->width = width;
     this->height = height;
 }
-
 
 void WgRenderTargetPool::release(WgContext& context)
 {
@@ -90,4 +107,4 @@ void WgRenderTargetPool::release(WgContext& context)
     pool.clear();
     height = 0;
     width = 0;
-};
+}

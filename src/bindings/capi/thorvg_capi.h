@@ -141,6 +141,19 @@ typedef struct
 } Tvg_Matrix;
 
 /**
+ * @brief A data structure representing an axis-aligned rectangular region.
+ *
+ * The region is defined by its minimum and maximum x and y coordinates.
+ *
+ * @note Experimental API
+ */
+typedef struct
+{
+    int32_t xMin, yMin;
+    int32_t xMax, yMax;
+} Tvg_Region;
+
+/**
  * @brief Enumeration specifying the methods of combining the 8-bit color channels into 32-bit color.
  *
  * @ingroup ThorVGCapi_Canvas
@@ -149,10 +162,12 @@ typedef enum
 {
     TVG_COLORSPACE_ABGR8888 = 0,   ///< The channels are joined in the order: alpha, blue, green, red. Colors are alpha-premultiplied.
     TVG_COLORSPACE_ARGB8888,       ///< The channels are joined in the order: alpha, red, green, blue. Colors are alpha-premultiplied.
-    TVG_COLORSPACE_ABGR8888S,      ///< The channels are joined in the order: alpha, blue, green, red. Colors are un-alpha-premultiplied. (since 0.13)
-    TVG_COLORSPACE_ARGB8888S,      ///< The channels are joined in the order: alpha, red, green, blue. Colors are un-alpha-premultiplied. (since 0.13)
-    TVG_COLORSPACE_GRAYSCALE8,     ///< Single channel, 1 byte per pixel 8-bit grayscale. (since 1.1)
-    TVG_COLORSPACE_UNKNOWN = 255,  ///< Unknown channel data. This is reserved for an initial ColorSpace value. (since 1.0)
+    TVG_COLORSPACE_ABGR8888S,      ///< The channels are joined in the order: alpha, blue, green, red. Colors are un-alpha-premultiplied. @since 0.13
+    TVG_COLORSPACE_ARGB8888S,      ///< The channels are joined in the order: alpha, red, green, blue. Colors are un-alpha-premultiplied. @since 0.13
+    TVG_COLORSPACE_GRAYSCALE8,     ///< Single channel, 1 byte per pixel 8-bit grayscale. @since 1.1
+    TVG_COLORSPACE_XBGR8888,       ///< 32-bit opaque color in the order: unused, blue, green, red. @note Experimental API
+    TVG_COLORSPACE_XRGB8888,       ///< 32-bit opaque color in the order: unused, red, green, blue. @note Experimental API
+    TVG_COLORSPACE_UNKNOWN = 255,  ///< Unknown channel data. This is reserved for an initial ColorSpace value. @since 1.0
 } Tvg_Colorspace;
 
 /**
@@ -413,6 +428,7 @@ typedef struct
  * This callback is invoked when a Picture requires an external asset
  * (such as an image or font resource). Implementations should load the asset
  * into the given @p paint object.
+ * Available embedded image and font data is loaded internally without invoking this callback.
  *
  * @param[in] paint The target paint object where the resolved asset will be loaded.
  * @param[in] src   The source path, identifier, or URI of the asset to be resolved.
@@ -441,15 +457,19 @@ typedef bool (*Tvg_Picture_Asset_Resolver)(Tvg_Paint paint, const char* src, voi
 /**
  * @brief Initializes the ThorVG engine.
  *
- * ThorVG requires an active runtime environment to operate.
- * Internally, it utilizes a task scheduler to efficiently parallelize rendering operations.
- * You can specify the number of worker threads using the @p threads parameter.
- * During initialization, ThorVG will spawn the specified number of threads.
+ * Sets up the internal task scheduler and launches the specified
+ * number of worker threads for parallel rendering operations.
  *
- * @param[in] threads The number of worker threads to create. A value of zero indicates that only the main thread will be used.
+ * @param[in] threads The number of worker threads to create. A value of 0 disables worker threads.
  *
- * @note The initializer uses internal reference counting to track multiple calls.
- *       The number of threads is fixed on the first call to tvg_engine_init() and cannot be changed in subsequent calls.
+ * @return Tvg_Result indicating success or failure of initialization.
+ *
+ * @note Initialization is reference-counted. Each successful call increments the reference count.
+ *       The worker thread count is determined by the first successful initialization and remains
+ *       unchanged until the engine is fully terminated.
+ *
+ * @warning Each @ref tvg_engine_init() call must be paired with a @ref tvg_engine_term() call on the same thread.
+ *
  * @see tvg_engine_term()
  */
 TVG_API Tvg_Result tvg_engine_init(unsigned threads);
@@ -457,11 +477,15 @@ TVG_API Tvg_Result tvg_engine_init(unsigned threads);
 /**
  * @brief Terminates the ThorVG engine.
  *
- * Cleans up resources and stops any internal threads initialized by tvg_engine_init().
+ * Releases internal resources and shuts down worker threads initialized by tvg_engine_init().
  *
- * @retval TVG_RESULT_INSUFFICIENT_CONDITION Returned if there is nothing to terminate (e.g., tvg_engine_init() was not called).
+ * @retval TVG_RESULT_INSUFFICIENT_CONDITION If the engine is not initialized.
  *
- * @note The initializer maintains a reference count for safe repeated use. Only the final call to tvg_engine_term() will fully shut down the engine.
+ * @note Initialization is reference-counted. Each call to @ref tvg_engine_term() decrements the reference count,
+ *       and the engine is fully terminated only when the count reaches zero.
+ *
+ * @warning Each @ref tvg_engine_init() call must be paired with a @ref tvg_engine_term() call on the same thread.
+ *
  * @see tvg_engine_init()
  */
 TVG_API Tvg_Result tvg_engine_term(void);
@@ -569,8 +593,6 @@ TVG_API Tvg_Result tvg_swcanvas_set_target(Tvg_Canvas canvas, uint32_t* buffer, 
  *
  * @return A new canvas object.
  *
- * @note Currently, it does not support @c TVG_ENGINE_OPTION_SMART_RENDER. The request will be ignored.
- *
  * @see enum Tvg_Engine_Option
  *
  * @since 1.0
@@ -659,13 +681,14 @@ TVG_API Tvg_Canvas tvg_wgcanvas_create(Tvg_Engine_Option op);
  * @param[in] target Either WGPUSurface or WGPUTexture, serving as handles to a presentable surface or texture.
  * @param[in] w The width of the target.
  * @param[in] h The height of the target.
- * @param[in] cs Specifies how the pixel values should be interpreted. Currently, it allows @c TVG_COLORSPACE_ABGR8888 and @c TVG_COLORSPACE_ABGR8888S.
+ * @param[in] cs Specifies how the pixel values should be interpreted. Currently, it allows @c TVG_COLORSPACE_ABGR8888, @c TVG_COLORSPACE_ABGR8888S, and @c TVG_COLORSPACE_XBGR8888.
  * @param[in] type @c 0: surface, @c 1: texture are used as presentable target.
  *
  * @retval TVG_RESULT_INSUFFICIENT_CONDITION if the canvas is performing rendering. Please ensure the canvas is synced.
  * @retval TVG_RESULT_NOT_SUPPORTED In case the wg engine is not supported.
  *
- * @warning Regardless of the value of @p cs, this target API uses the default alpha mode.
+ * @warning For alpha formats, this target API uses the default alpha mode.
+ * @note @c TVG_COLORSPACE_XBGR8888 selects opaque surface composition and ignores output alpha. This format requires @p type to be @c 0.
  *
  * @see tvg_wgcanvas_set_target_with_context()
  *
@@ -680,12 +703,13 @@ TVG_API Tvg_Result tvg_wgcanvas_set_target(Tvg_Canvas canvas, void* device, void
  * @param[in] target Either WGPUSurface or WGPUTexture, serving as handles to a presentable surface or texture.
  * @param[in] w The width of the target.
  * @param[in] h The height of the target.
- * @param[in] cs Specifies how the pixel values should be interpreted. Currently, it allows @c TVG_COLORSPACE_ABGR8888 and @c TVG_COLORSPACE_ABGR8888S.
+ * @param[in] cs Specifies how the pixel values should be interpreted. Currently, it allows @c TVG_COLORSPACE_ABGR8888, @c TVG_COLORSPACE_ABGR8888S, and @c TVG_COLORSPACE_XBGR8888.
  * @param[in] type @c 0: surface, @c 1: texture are used as presentable target.
  *
  * @retval TVG_RESULT_INSUFFICIENT_CONDITION if the canvas is performing rendering. Please ensure the canvas is synced.
  * @retval TVG_RESULT_NOT_SUPPORTED In case the wg engine is not supported.
  *
+ * @note @c TVG_COLORSPACE_XBGR8888 selects opaque surface composition and ignores output alpha. This format requires @p type to be @c 0.
  * @note Experimental API
  */
 TVG_API Tvg_Result tvg_wgcanvas_set_target_with_context(Tvg_Canvas canvas, const Tvg_WgContext* context, void* target, uint32_t w, uint32_t h, Tvg_Colorspace cs, int type);
@@ -828,6 +852,40 @@ TVG_API Tvg_Result tvg_canvas_draw(Tvg_Canvas canvas, bool clear);
  * @see tvg_canvas_draw()
  */
 TVG_API Tvg_Result tvg_canvas_sync(Tvg_Canvas canvas);
+
+/**
+ * @brief Returns the number of dirty regions of the canvas.
+ *
+ * @param[in] canvas The canvas object.
+ *
+ * @return The number of regions available for retrieval, or zero if @p canvas is NULL.
+ *
+ * @note This function must be called after @ref tvg_canvas_draw() and before @ref tvg_canvas_sync().
+ * @note If the active rendering backend does not support @c TVG_ENGINE_OPTION_SMART_RENDER, this function returns 1.
+ * @note Experimental API
+ *
+ * @see tvg_canvas_get_dirty_regions()
+ */
+TVG_API uint32_t tvg_canvas_get_dirty_regions_cnt(Tvg_Canvas canvas);
+
+/**
+ * @brief Retrieves the dirty regions of the canvas.
+ *
+ * @param[in] canvas The canvas object.
+ * @param[out] regions An array to receive the dirty regions.
+ * @param[in] cnt The number of Tvg_Region elements that the array can hold.
+ *
+ * @retval TVG_RESULT_INVALID_ARGUMENT If @p canvas or @p regions is @c NULL, or @p cnt is zero.
+ * @retval TVG_RESULT_INSUFFICIENT_CONDITION If called outside the interval after tvg_canvas_draw() and before tvg_canvas_sync().
+ *
+ * @note This function must be called after @ref tvg_canvas_draw() and before @ref tvg_canvas_sync().
+ * @note If the active rendering backend does not support @c TVG_ENGINE_OPTION_SMART_RENDER,
+ *       a single region covering the entire render target is returned.
+ * @note Experimental API
+ *
+ * @see tvg_canvas_get_dirty_regions_cnt()
+ */
+TVG_API Tvg_Result tvg_canvas_get_dirty_regions(Tvg_Canvas canvas, Tvg_Region* regions, uint32_t cnt);
 
 /**
  * @brief Sets the drawing region of the canvas.
@@ -2073,6 +2131,8 @@ TVG_API Tvg_Result tvg_picture_load(Tvg_Paint picture, const char* path);
  *
  * @retval TVG_RESULT_INVALID_ARGUMENT No data are provided or the @p w or @p h value is zero or less.
  *
+ * @note @c TVG_COLORSPACE_XBGR8888 and @c TVG_COLORSPACE_XRGB8888 overwrite fully covered pixels without alpha blending.
+ *
  * @since 0.9
  */
 TVG_API Tvg_Result tvg_picture_load_raw(Tvg_Paint picture, const uint32_t *data, uint32_t w, uint32_t h, Tvg_Colorspace cs, bool copy);
@@ -2099,29 +2159,34 @@ TVG_API Tvg_Result tvg_picture_load_raw(Tvg_Paint picture, const uint32_t *data,
 TVG_API Tvg_Result tvg_picture_load_data(Tvg_Paint picture, const char *data, uint32_t size, const char *mimetype, const char* rpath, bool copy);
 
 /**
- * @brief Sets the asset resolver callback for handling external resources (e.g., images and fonts).
+ * @brief Sets the asset resolver callback for external images and fonts.
  *
- * This callback is invoked when an external asset reference (such as an image source or file path)
- * is encountered in a Picture object. It allows the user to provide a custom mechanism for loading
- * or substituting assets, such as loading from an external source or a virtual filesystem.
+ * The callback allows the user to load assets from an external source or a virtual filesystem,
+ * or provide a substitute. Set @p fallback to @c true to invoke it only when internal resolution fails,
+ * or @c false to invoke it before internal resolution.
  *
+ * @param[in] picture The picture object.
  * @param[in] resolver A user-defined function that handles the resolution of asset paths.
  *                     The function should return @c true if the asset was successfully resolved by the user, or @c false if it was not.
  * @param[in] data A pointer to user-defined data that will be passed to the callback each time it is invoked.
  *                 This can be used to maintain context or access external resources.
  *
- * @retval TVG_RESULT_INVALID_ARGUMENT A @c nullptr passed as the @p picture argument.
- * @retval TVG_RESULT_INSUFFICIENT_CONDITION If the @p picture is already loaded.
+ * @param[in] fallback If @c true, invoke the callback only after internal resolution fails.
+ *                     If @c false, invoke it first and attempt internal resolution only if it returns @c false.
  *
- * @note This function must be called before @ref tvg_picture_load()
- *       Setting the resolver after loading will have no effect on asset resolution for that asset.
- * @note If @c false is returned by @p resolver, ThorVG will attempt to resolve the resource using its internal resolution mechanism as a fallback.
- * @note To unset the resolver, pass @c nullptr as the @p resolver parameter.
+ * @retval TVG_RESULT_INSUFFICIENT_CONDITION If the @p picture is already loaded. The resolver is not changed.
+ *
+ * @note This function must be called before loading the picture.
+ * @note Available embedded image and font data is loaded internally without invoking the callback.
+ * @note @p src identifies the asset to resolve, such as an image path, a font path, or a font name.
+ *       Font names are prefixed with "name:" (e.g., "name:FreeSans-Medium") to distinguish them from paths.
+ * @note For fonts, if neither the callback nor internal resolution succeeds, ThorVG attempts to use an available font.
+ * @note To unset the resolver before loading, pass @c nullptr as the @p resolver parameter.
  * @note Experimental API
  *
  * @see Tvg_Picture_Asset_Resolver
  */
-TVG_API Tvg_Result tvg_picture_set_asset_resolver(Tvg_Paint picture, Tvg_Picture_Asset_Resolver resolver, void* data);
+TVG_API Tvg_Result tvg_picture_set_asset_resolver(Tvg_Paint picture, Tvg_Picture_Asset_Resolver resolver, void* data, bool fallback);
 
 /**
  * @brief Resizes the picture content to the given width and height.
@@ -2363,20 +2428,32 @@ TVG_API Tvg_Result tvg_scene_clear_effects(Tvg_Paint scene);
  * The blur can be applied in different directions with configurable border handling and quality settings.
  *
  * @param[in] scene The scene object.
- * @param[in] sigma The blur radius (sigma) value. Must be greater than 0.
+ * @param[in] sigma The blur radius (sigma) value. Must be >= 0.
  * @param[in] direction Blur direction: 0 = both directions, 1 = horizontal only, 2 = vertical only.
- * @param[in] border Border handling method: 0 = duplicate, 1 = wrap.
- * @param[in] quality Blur quality level [0 - 100].
+ * @param[in] border Reserved for border handling. Currently ignored.
+ * @param[in] quality Visual quality level [0 - 100].
  *
  * @since 1.0
  */
 TVG_API Tvg_Result tvg_scene_add_effect_gaussian_blur(Tvg_Paint scene, double sigma, int direction, int border, int quality);
 
 /**
+ * @brief Adds a centered linear motion blur.
+ *
+ * @param[in] scene The scene to apply the effect to.
+ * @param[in] distance Total blur length in scene-local units. Must be >= 0.
+ * @param[in] angle Angle in degrees, clockwise from the positive X axis. The scene transform applies to the blur vector.
+ * @param[in] quality Visual quality level [0 - 100].
+ *
+ * @note Experimental API
+ */
+TVG_API Tvg_Result tvg_scene_add_effect_motion_blur(Tvg_Paint scene, double distance, double angle, int quality);
+
+/**
  * @brief Adds a drop shadow effect to the scene.
  *
- * This function adds a drop shadow with a Gaussian blur to the scene. The shadow 
- * can be customized using color, opacity, angle, distance, blur radius (sigma), 
+ * This function adds a drop shadow with a Gaussian blur to the scene. The shadow
+ * can be customized using color, opacity, angle, distance, blur radius (sigma),
  * and quality parameters.
  *
  * @param[in] scene The scene object.
@@ -2387,7 +2464,7 @@ TVG_API Tvg_Result tvg_scene_add_effect_gaussian_blur(Tvg_Paint scene, double si
  * @param[in] angle Shadow direction in degrees [0 - 360].
  * @param[in] distance Distance of the shadow from the original object.
  * @param[in] sigma Gaussian blur sigma value for the shadow. Must be > 0.
- * @param[in] quality Blur quality level [0 - 100].
+ * @param[in] quality Visual quality level [0 - 100].
  *
  * @since 1.0
  */
