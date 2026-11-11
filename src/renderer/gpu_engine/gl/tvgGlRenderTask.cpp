@@ -80,12 +80,28 @@ void GlRenderTask::run(GlStateCache& state)
         }
     }
 
+    // Native blending on premultiplied shader output.
+    switch (blendMethod) {
+        case BlendMethod::Normal:
+            state.blendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            break;
+        case BlendMethod::Screen:
+            state.blendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_COLOR, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            break;
+        case BlendMethod::Exclusion:
+            state.blendFuncSeparate(GL_ONE_MINUS_DST_COLOR, GL_ONE_MINUS_SRC_COLOR, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            break;
+        case BlendMethod::Add:  // Porter-Duff lighter: add both RGB and alpha.
+            state.blendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ONE);
+            break;
+        default: break;
+    }
+
     if (useDrawArrays) {
         GL_CHECK(glDrawArrays(arrayMode, arrayOffset, indexCnt));
     } else {
         GL_CHECK(glDrawElements(GL_TRIANGLES, indexCnt, GL_UNSIGNED_INT, reinterpret_cast<void*>(indexOffset)));
     }
-
 }
 
 void GlRenderTask::addVertexLayout(const GlVertexLayout& layout)
@@ -127,8 +143,8 @@ void GlRenderTask::setDrawRange(uint32_t offset, uint32_t count)
 void GlRenderTask::setViewport(const RenderRegion &viewport)
 {
     this->viewport = viewport;
-    this->viewport.max.x = std::max(viewport.min.x, viewport.max.x);
-    this->viewport.max.y = std::max(viewport.min.y, viewport.max.y);
+    this->viewport.xMax = std::max(viewport.xMin, viewport.xMax);
+    this->viewport.yMax = std::max(viewport.yMin, viewport.yMax);
 }
 
 
@@ -222,7 +238,19 @@ void GlComposeTask::run(GlStateCache& state)
     state.clearDepth(0.0);
     state.depthMask(GL_TRUE);
 
-    GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    if (partial) {
+        // Partial rendering keeps the colors outside of the regions. All draws use depths below 1.0
+        // with GL_GREATER, so the maximum depth rejects any draw outside of the regions.
+        state.clearDepth(1.0);
+        GL_CHECK(glClear(GL_STENCIL_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+        state.clearDepth(0.0);
+        ARRAY_FOREACH(p, *partial) {
+            state.scissor(p->sx(), fbo->height - p->yMax, p->sw(), p->sh());
+            GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+        }
+    } else {
+        GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    }
     state.depthMask(GL_FALSE);
     state.viewport(0, 0, renderWidth, renderHeight);
     state.scissor(0, 0, renderWidth, renderHeight);
@@ -264,9 +292,7 @@ void GlBlitTask::run(GlStateCache& state)
     }
 
     state.disable(GL_DEPTH_TEST);
-    // make sure the blending is correct
     state.enable(GL_BLEND);
-    state.blendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
     GlRenderTask::run(state);
 }
@@ -309,14 +335,14 @@ void GlSceneBlendTask::run(GlStateCache& state)
     state.bindFramebuffer(GL_DRAW_FRAMEBUFFER, dstCopyFbo->resolvedFbo);
     state.viewport(0, 0, dstCopyFbo->width, dstCopyFbo->height);
     state.scissor(0, 0, dstCopyFbo->width, dstCopyFbo->height);
-    GL_CHECK(glBlitFramebuffer(vp.min.x, vp.min.y, vp.max.x, vp.max.y, 0, 0, vp.w(), vp.h(), GL_COLOR_BUFFER_BIT, GL_LINEAR));
+    GL_CHECK(glBlitFramebuffer(vp.xMin, vp.yMin, vp.xMax, vp.yMax, 0, 0, vp.w(), vp.h(), GL_COLOR_BUFFER_BIT, GL_LINEAR));
 #else // TODO: create partial buffer when MSAA is disabled
     state.bindFramebuffer(GL_DRAW_FRAMEBUFFER, dstCopyFbo->resolvedFbo);
-    if (vp.min.x != 0 || vp.min.y != 0 || dstCopyFbo->width != static_cast<uint32_t>(vp.w()) || dstCopyFbo->height != static_cast<uint32_t>(vp.h())) clearColorTarget(state, dstCopyFbo->width, dstCopyFbo->height);
+    if (vp.xMin != 0 || vp.yMin != 0 || dstCopyFbo->width != static_cast<uint32_t>(vp.w()) || dstCopyFbo->height != static_cast<uint32_t>(vp.h())) clearColorTarget(state, dstCopyFbo->width, dstCopyFbo->height);
     state.bindFramebuffer(GL_READ_FRAMEBUFFER, srcFbo->fbo);
     state.viewport(0, 0, width, height);
-    state.scissor(vp.min.x, vp.min.y, vp.w(), vp.h());
-    GL_CHECK(glBlitFramebuffer(vp.min.x, vp.min.y, vp.max.x, vp.max.y, vp.min.x, vp.min.y, vp.max.x, vp.max.y, GL_COLOR_BUFFER_BIT, GL_NEAREST));
+    state.scissor(vp.xMin, vp.yMin, vp.w(), vp.h());
+    GL_CHECK(glBlitFramebuffer(vp.xMin, vp.yMin, vp.xMax, vp.yMax, vp.xMin, vp.yMin, vp.xMax, vp.yMax, GL_COLOR_BUFFER_BIT, GL_NEAREST));
 #endif
 
     state.bindFramebuffer(GL_FRAMEBUFFER, targetFbo);
@@ -324,9 +350,9 @@ void GlSceneBlendTask::run(GlStateCache& state)
     state.scissor(0, 0, parentWidth, parentHeight);
 
     state.disable(GL_DEPTH_TEST);
-    state.blendFunc(GL_ONE, GL_ZERO);
+    state.disable(GL_BLEND);
     GlRenderTask::run(state);
-    state.blendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    state.enable(GL_BLEND);
     state.enable(GL_DEPTH_TEST);
 }
 
@@ -400,9 +426,9 @@ void GlDirectBlendTask::run(GlStateCache& state)
     const auto& dstVp = dstFbo->viewport;
     state.viewport(0, 0, dstVp.w(), dstVp.h());
 
-    state.blendFunc(GL_ONE, GL_ZERO);
+    state.disable(GL_BLEND);
     GlRenderTask::run(state);
-    state.blendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    state.enable(GL_BLEND);
 }
 
 
@@ -428,12 +454,12 @@ void GlComplexBlendTask::run(GlStateCache& state)
     // copy the current fbo to the dstCopyFbo
     state.viewport(0, 0, dstVp.w(), dstVp.h());
     state.scissor(0, 0, dstVp.w(), dstVp.h());
-    GL_CHECK(glBlitFramebuffer(vp.min.x, vp.min.y, vp.max.x, vp.max.y, 0, 0, vp.w(), vp.h(), GL_COLOR_BUFFER_BIT, GL_LINEAR));
+    GL_CHECK(glBlitFramebuffer(vp.xMin, vp.yMin, vp.xMax, vp.yMax, 0, 0, vp.w(), vp.h(), GL_COLOR_BUFFER_BIT, GL_LINEAR));
 #else // TODO: create partial buffer when MSAA is disabled
-    if (vp.min.x != 0 || vp.min.y != 0 || dstCopyFbo->width != static_cast<uint32_t>(vp.w()) || dstCopyFbo->height != static_cast<uint32_t>(vp.h())) clearColorTarget(state, dstCopyFbo->width, dstCopyFbo->height);
+    if (vp.xMin != 0 || vp.yMin != 0 || dstCopyFbo->width != static_cast<uint32_t>(vp.w()) || dstCopyFbo->height != static_cast<uint32_t>(vp.h())) clearColorTarget(state, dstCopyFbo->width, dstCopyFbo->height);
     state.viewport(0, 0, width, height);
-    state.scissor(vp.min.x, vp.min.y, vp.w(), vp.h());
-    GL_CHECK(glBlitFramebuffer(vp.min.x, vp.min.y, vp.max.x, vp.max.y, vp.min.x, vp.min.y, vp.max.x, vp.max.y, GL_COLOR_BUFFER_BIT, GL_NEAREST));
+    state.scissor(vp.xMin, vp.yMin, vp.w(), vp.h());
+    GL_CHECK(glBlitFramebuffer(vp.xMin, vp.yMin, vp.xMax, vp.yMax, vp.xMin, vp.yMin, vp.xMax, vp.yMax, GL_COLOR_BUFFER_BIT, GL_NEAREST));
 #endif
 
     state.bindFramebuffer(GL_FRAMEBUFFER, dstFbo->fbo);
@@ -452,12 +478,12 @@ void GlComplexBlendTask::run(GlStateCache& state)
     state.stencilFunc(GL_NOTEQUAL, 0x0, 0xFF);
     state.stencilOp(GL_REPLACE, GL_KEEP, GL_REPLACE);
 
-    state.blendFunc(GL_ONE, GL_ZERO);
+    state.disable(GL_BLEND);
 
     GlRenderTask::run(state);
 
     state.disable(GL_STENCIL_TEST);
-    state.blendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    state.enable(GL_BLEND);
 }
 
 
@@ -565,10 +591,10 @@ void GlEffectDropShadowTask::run(GlStateCache& state)
 }
 
 /************************************************************************/
-/* GlEffectColorTransformTask Class Implementation                      */
+/* GlEffectTask Class Implementation                                    */
 /************************************************************************/
 
-void GlEffectColorTransformTask::run(GlStateCache& state)
+void GlEffectTask::run(GlStateCache& state)
 {
     const auto width = dstFbo->width;
     const auto height = dstFbo->height;
@@ -583,7 +609,7 @@ void GlEffectColorTransformTask::run(GlStateCache& state)
     GL_CHECK(glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST));
     state.bindFramebuffer(GL_FRAMEBUFFER, dstFbo->fbo);
 
-    // run transform
+    // run the single-pass effect
     state.disable(GL_BLEND);
     state.depthFunc(GL_ALWAYS);
     GlRenderTask::run(state);

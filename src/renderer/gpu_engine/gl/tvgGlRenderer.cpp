@@ -41,6 +41,7 @@ static StrictKey _rendererMtx;
 static constexpr float IDENTITY_VERTEX[] = {-1.f, 1.f, -1.f, -1.f, 1.f, 1.f, 1.f, -1.f};
 static constexpr uint32_t RECT_INDEX[] = {0, 1, 2, 2, 1, 3};
 static constexpr uint32_t RECT_INDEX_COUNT = sizeof(RECT_INDEX) / sizeof(RECT_INDEX[0]);
+static constexpr uint32_t MAX_PARTIAL_REGIONS = 32;  // more fragmented regions redraw their bounds instead
 
 bool GlDrawable::prepare(RenderUpdateFlag& updateFlags, const Point& viewSize, uint8_t opacity, bool clipper)
 {
@@ -86,6 +87,15 @@ static bool _packGradientBlock(float* stopInfo, float* stopPoints, float* stopCo
     }
     stopInfo[0] = nStops;
     return opaque;
+}
+
+static bool _sameClips(const Array<RenderData>& lhs, const Array<RenderData>& rhs)
+{
+    if (lhs.count != rhs.count) return false;
+    for (uint32_t i = 0; i < lhs.count; ++i) {
+        if (lhs[i] != rhs[i]) return false;
+    }
+    return true;
 }
 
 static bool _skipRender(const Array<RenderData>& clips)
@@ -139,6 +149,33 @@ void GlRenderer::flush()
 
     ARRAY_FOREACH(p, mComposeStack) delete(*p);
     mComposeStack.clear();
+}
+
+
+// report the previous and the current regions of the drawable for partial rendering,
+// retained pixels are reported only when their visible region changed
+void GlRenderer::dirty(GlDrawable* drawable, bool visible, bool retained)
+{
+    RenderRegion box{};
+    if (visible) {
+        box = drawable->geometry.bounds();
+        box.intersect(drawable->geometry.viewport);
+    }
+    if (retained && box == drawable->box) return;
+    if (!mDirtyRegion.deactivated()) mDirtyRegion.add(drawable->box, box);
+    drawable->box = box;
+}
+
+
+// partial rendering skips drawables outside of the redrawn regions
+bool GlRenderer::culled(const RenderRegion& box)
+{
+    if (!mPartialDraw) return false;
+    if (!mRenderBounds.intersected(box)) return true;
+    ARRAY_FOREACH(p, mRenderRegions) {
+        if (p->intersected(box)) return false;
+    }
+    return true;
 }
 
 
@@ -247,7 +284,7 @@ void GlRenderer::initShaders()
     // blit Renderer
     mPrograms.push(new GlProgram(BLIT_VERT_SHADER, BLIT_FRAG_SHADER));
 
-    // blend programs: image, scene, solid shape, and three gradient types (17 each)
+    // Reserve custom blend programs for each source.
     while (mPrograms.count < static_cast<uint32_t>(RT_None)) mPrograms.push(nullptr);
 }
 
@@ -259,7 +296,7 @@ RenderRegion GlRenderer::viewportRegion(const RenderRegion& vp, const RenderRegi
     auto h = bbox.sh();
     auto yGl = vp.sh() - y - h;
 
-    return {{x, yGl}, {x + w, yGl + h}};
+    return {x, yGl, x + w, yGl + h};
 }
 
 static Matrix _viewMatrix(const GlGeometry& geometry, const Matrix& viewMatrix, RenderUpdateFlag flag)
@@ -270,11 +307,16 @@ static Matrix _viewMatrix(const GlGeometry& geometry, const Matrix& viewMatrix, 
     return viewMatrix;
 }
 
+static bool _nativeBlend(BlendMethod method)
+{
+    return method == BlendMethod::Normal || method == BlendMethod::Screen || method == BlendMethod::Exclusion || method == BlendMethod::Add;
+}
+
 GlRenderTask* GlRenderer::createPrimitiveTask(RenderTypes type, BlendSource source, const RenderRegion& viewRegion, GlRenderTarget*& dstCopyFbo)
 {
     dstCopyFbo = nullptr;
 
-    if (mBlendMethod == BlendMethod::Normal) return new GlRenderTask(mPrograms[type]);
+    if (_nativeBlend(mBlendMethod)) return new GlRenderTask(mPrograms[type], mBlendMethod);
 
     if (mBlendPool.empty()) mBlendPool.push(new GlRenderTargetPool(surface.w, surface.h, mStateCache));
 #if defined(THORVG_GL_TARGET_GL)
@@ -326,7 +368,7 @@ void GlRenderer::drawPrimitive(GlShape& shape, const RenderColor& c, RenderUpdat
     auto viewRegion = viewportRegion(vp, bbox);
     auto stencilMode = shape.geometry.stencilMode(flag);
 
-    if (!stroke && !blendShape && stencilMode == GlStencilMode::None && shape.clips.empty()) {
+    if (!stroke && _nativeBlend(mBlendMethod) && stencilMode == GlStencilMode::None && shape.clips.empty()) {
         mSolidBatch.draw(*this, shape, c, depth, viewRegion, viewportRegion(vp, viewBounds));
         return;
     }
@@ -350,7 +392,9 @@ void GlRenderer::drawPrimitive(GlShape& shape, const RenderColor& c, RenderUpdat
     }
     RenderColor color = {c.r, c.g, c.b, a};
 
-    if (stroke && (blendShape || a == 255)) {
+    // A copied destination can be overwritten repeatedly. Native blending
+    // must keep stencil coverage even for opaque, overlapping strokes.
+    if (stroke && (dstCopyFbo || (!blendShape && a == 255))) {
         stencilMode = GlStencilMode::None;
     }
 
@@ -457,7 +501,7 @@ void GlRenderer::drawPrimitive(GlShape& shape, const Fill* fill, RenderUpdateFla
     if (flag & RenderUpdateFlag::GradientStroke) {
         auto strokeWidth = shape.geometry.strokeRenderWidth;
         if (strokeWidth < MIN_GL_STROKE_WIDTH) {
-            alpha = strokeWidth / MIN_GL_STROKE_WIDTH;
+            alpha *= strokeWidth / MIN_GL_STROKE_WIDTH;
         }
     }
 
@@ -523,7 +567,7 @@ void GlRenderer::drawPrimitive(GlShape& shape, const Fill* fill, RenderUpdateFla
     bindBlendTarget(task, dstCopyFbo, viewRegion, 3);
 
     auto stencilMode = shape.geometry.stencilMode(flag);
-    if (stroke && (mBlendMethod != BlendMethod::Normal || opaque)) stencilMode = GlStencilMode::None;
+    if (stroke && (dstCopyFbo || (mBlendMethod == BlendMethod::Normal && opaque))) stencilMode = GlStencilMode::None;
     auto preparation = mStencilCoverBatch.prepare(*this, task, shape, flag, stencilMode, nullptr, viewBounds);
 
     mStencilCoverBatch.draw(currentPass(), task, preparation);
@@ -564,6 +608,10 @@ void GlRenderer::drawClip(Array<RenderData>& clips, const RenderRegion& viewBoun
         shape->geometry.draw(clipTask, &mGpuBuffer, flag);
 
         auto clipBounds = shape->geometry.bounds();
+        if (restoreBounds || mPartialDraw) {
+            shape->box = clipBounds;
+            shape->box.intersect(shape->geometry.viewport);
+        }
         clipBounds.intersect(viewBounds);
         clipTask->setViewport(viewportRegion(passViewport, clipBounds));
 
@@ -588,12 +636,10 @@ GlRenderPass* GlRenderer::currentPass()
 
 bool GlRenderer::beginComplexBlending(const RenderRegion& vp, RenderRegion bounds)
 {
-    if (vp.invalid()) return false;
+    if (_nativeBlend(mBlendMethod) || vp.invalid()) return false;
 
     bounds.intersect(vp);
     if (bounds.invalid()) return false;
-
-    if (mBlendMethod == BlendMethod::Normal) return false;
 
     if (mBlendPool.empty()) mBlendPool.push(new GlRenderTargetPool(surface.w, surface.h, mStateCache));
 
@@ -621,7 +667,7 @@ void GlRenderer::endBlendingCompose(GlRenderTask* stencilTask)
 
     auto x = vp.sx();
     auto y = currentPass()->getViewport().sh() - vp.sy() - vp.sh();
-    stencilTask->setViewport({{x, y}, {x + vp.sw(), y + vp.sh()}});
+    stencilTask->setViewport({x, y, x + vp.sw(), y + vp.sh()});
 
     stencilTask->setDrawDepth(currentPass()->nextDrawDepth());
     stencilTask->setViewMatrix(currentPass()->getViewMatrix());
@@ -655,10 +701,8 @@ void GlRenderer::endBlendingCompose(GlRenderTask* stencilTask)
 GlProgram* GlRenderer::getBlendProgram(BlendMethod method, BlendSource source)
 {
     // custom blend shaders
-    static const char* shaderFunc[17] {
-        NORMAL_BLEND_FRAG,
+    static const char* shaderFunc[BlendShaderCount] {
         MULTIPLY_BLEND_FRAG,
-        SCREEN_BLEND_FRAG,
         OVERLAY_BLEND_FRAG,
         DARKEN_BLEND_FRAG,
         LIGHTEN_BLEND_FRAG,
@@ -667,25 +711,15 @@ GlProgram* GlRenderer::getBlendProgram(BlendMethod method, BlendSource source)
         HARD_LIGHT_BLEND_FRAG,
         SOFT_LIGHT_BLEND_FRAG,
         DIFFERENCE_BLEND_FRAG,
-        EXCLUSION_BLEND_FRAG,
         HUE_BLEND_FRAG,
         SATURATION_BLEND_FRAG,
         COLOR_BLEND_FRAG,
-        LUMINOSITY_BLEND_FRAG,
-        ADD_BLEND_FRAG
+        LUMINOSITY_BLEND_FRAG
     };
 
-    uint32_t methodInd = (uint32_t)method;
-    uint32_t shaderInd = methodInd;
-
-    switch (source) {
-        case BlendSource::Scene: shaderInd += (uint32_t)RT_Blend_Scene_Normal; break;
-        case BlendSource::Image: shaderInd += (uint32_t)RT_Blend_Image_Normal; break;
-        case BlendSource::Solid: shaderInd += (uint32_t)RT_ShapeBlend_Solid_Normal; break;
-        case BlendSource::LinearGradient: shaderInd += (uint32_t)RT_ShapeBlend_Linear_Normal; break;
-        case BlendSource::RadialGradient: shaderInd += (uint32_t)RT_ShapeBlend_Radial_Normal; break;
-        case BlendSource::ConicGradient: shaderInd += (uint32_t)RT_ShapeBlend_Conic_Normal; break;
-    }
+    // Native Normal, Screen, Exclusion and Add have no custom shader slots.
+    uint32_t methodInd = (uint32_t)method - 1 - (method > BlendMethod::Screen) - (method > BlendMethod::Exclusion);
+    uint32_t shaderInd = RT_Blend + (uint32_t)source * BlendShaderCount + methodInd;
 
     if (mPrograms[shaderInd]) return mPrograms[shaderInd];
 
@@ -763,7 +797,7 @@ GlProgram* GlRenderer::getBlendProgram(BlendMethod method, BlendSource source)
 
 void GlRenderer::prepareBlitTask(GlBlitTask* task)
 {
-    prepareCmpTask(task, {{0, 0}, {int32_t(surface.w), int32_t(surface.h)}}, surface.w, surface.h);
+    prepareCmpTask(task, {0, 0, int32_t(surface.w), int32_t(surface.h)}, surface.w, surface.h);
     task->addBindResource(GlBindingResource{0, task->colorTex, GlShaderUniform::SourceTexture});
 }
 
@@ -810,7 +844,7 @@ void GlRenderer::prepareCmpTask(GlRenderTask* task, const RenderRegion& vp, uint
     task->addVertexLayout(GlVertexLayout{1, 2, 4 * sizeof(float), vertexOffset + 2 * sizeof(float), GL_FLOAT, GL_FALSE, mGpuBuffer.getBufferId()});
     task->setDrawRange(indexOffset, RECT_INDEX_COUNT);
     y = (passVp.sh() - y - h);
-    task->setViewport({{x, y}, {x + w, y + h}});
+    task->setViewport({x, y, x + w, y + h});
 }
 
 
@@ -881,7 +915,7 @@ void GlRenderer::endRenderPass(RenderCompositor* cmp)
         }
         delete(selfPass);
         delete(maskPass);
-    } else if (glCmp->blendMethod != BlendMethod::Normal) {
+    } else if (!_nativeBlend(glCmp->blendMethod)) {
         auto renderPass = mRenderPassStack.pick();
         if (!renderPass->isEmpty()) {
             if (mBlendPool.count < 1) mBlendPool.push(new GlRenderTargetPool(surface.w, surface.h, mStateCache));
@@ -923,6 +957,7 @@ void GlRenderer::endRenderPass(RenderCompositor* cmp)
         auto renderPass = mRenderPassStack.pick();
         if (!renderPass->isEmpty()) {
             auto task = renderPass->endRenderPass<GlDrawBlitTask>(mPrograms[RT_Image], currentPass()->getFboId());
+            task->blendMethod = glCmp->blendMethod;
             task->setRenderSize(glCmp->bbox.w(), glCmp->bbox.h());
             prepareCmpTask(task, glCmp->bbox, renderPass->getFboWidth(), renderPass->getFboHeight());
             task->setDrawDepth(currentPass()->nextDrawDepth());
@@ -957,6 +992,7 @@ bool GlRenderer::clear()
     if (mRootTarget.invalid()) return false;
 
     mClearBuffer = true;
+    mFullDraw = true;
     return true;
 }
 
@@ -991,9 +1027,12 @@ Result GlRenderer::target(void* display, void* surface, void* context, int32_t i
     // reused by the new context, so do not carry any binding assumptions over.
     mStateCache.invalidate();
 
-    mRootTarget.viewport = {{0, 0}, {int32_t(this->surface.w), int32_t(this->surface.h)}};
+    mRootTarget.viewport = {0, 0, int32_t(this->surface.w), int32_t(this->surface.h)};
     mRootTarget.init(mStateCache, this->surface.w, this->surface.h, mTargetFboId);
     mStateCache.invalidate();
+
+    mDirtyRegion.init(w, h);
+    mFullDraw = true;
 
     return ret ? Result::Success : Result::InsufficientCondition;
 }
@@ -1015,8 +1054,6 @@ bool GlRenderer::sync()
     // Applications sharing the context must reset any other OpenGL state that
     // can affect rendering before calling sync().
 
-    // Blend function for straight alpha
-    mStateCache.blendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     mStateCache.enable(GL_BLEND);
     mStateCache.enable(GL_SCISSOR_TEST);
     GL_CHECK(glCullFace(GL_FRONT_AND_BACK));
@@ -1029,7 +1066,8 @@ bool GlRenderer::sync()
     prepareBlitTask(task);
 
     task->clearBuffer = mClearBuffer;
-    task->targetViewport = {{0, 0}, {int32_t(surface.w), int32_t(surface.h)}};
+    task->partial = mPartialDraw ? &mRenderRegions : nullptr;
+    task->targetViewport = {0, 0, int32_t(surface.w), int32_t(surface.h)};
 
     if (mGpuBuffer.flushToGPU(mStateCache)) {
         mGpuBuffer.bind(mStateCache);
@@ -1091,22 +1129,51 @@ bool GlRenderer::preRender()
     if (mPrograms.empty()) initShaders();
     mRenderPassStack.push(new GlRenderPass(&mRootTarget));
 
+    mRenderBounds = mRootTarget.viewport;
+    mRenderRegions.clear();
+    restoreBounds = mFullDraw && !mClearBuffer;
+    mPartialDraw = !mFullDraw && !mDirtyRegion.deactivated();
+
+    if (mPartialDraw) {
+        mDirtyRegion.commit();
+        mRenderBounds = {INT32_MAX, INT32_MAX, 0, 0};
+        for (int idx = 0; idx < RenderDirtyRegion::PARTITIONING; ++idx) {
+            ARRAY_FOREACH(p, mDirtyRegion.get(idx)) {
+                mRenderRegions.push(*p);
+                mRenderBounds.add(*p);
+            }
+        }
+        // blended scenes composite without the depth test and would leak into the gaps between the regions
+        if (mRenderRegions.count > MAX_PARTIAL_REGIONS || mBlended) {
+            mRenderRegions.clear();
+            if (mRenderBounds.valid()) mRenderRegions.push(mRenderBounds);
+        }
+    }
+    mBlended = false;
+
     return true;
 }
 
 
 bool GlRenderer::postRender()
 {
+    mDirtyRegion.clear();
+    // Remember explicit clears so the next update can skip damage collection.
+    mFullDraw = mClearBuffer;
+
     return true;
 }
 
 
-RenderCompositor* GlRenderer::target(const RenderRegion& region, TVG_UNUSED ColorSpace cs, TVG_UNUSED CompositionFlag flags)
+RenderCompositor* GlRenderer::target(const RenderRegion& region, TVG_UNUSED ColorSpace cs, CompositionFlag flags)
 {
+    if (flags & CompositionFlag::Blending) mBlended = true;
+
     auto vp = region;
     if (currentPass()->isEmpty()) return nullptr;
 
     vp.intersect(currentPass()->getViewport());
+    if (mPartialDraw) vp.intersect(mRenderBounds);
 
     mComposeStack.push(new GlCompositor(vp, flags));
     return mComposeStack.last();
@@ -1203,6 +1270,13 @@ bool GlRenderer::renderImage(void* data)
     if (!image) return false;
 
     if (currentPass()->isEmpty()) return true;
+    if (mPartialDraw || restoreBounds) {
+        if (restoreBounds || image->box == image->geometry.viewport) {
+            image->box = image->geometry.bounds();
+            image->box.intersect(image->geometry.viewport);
+        }
+        if (culled(image->box)) return true;
+    }
 
     auto vp = currentPass()->getViewport();
     auto bbox = image->geometry.viewport;
@@ -1213,7 +1287,8 @@ bool GlRenderer::renderImage(void* data)
 
     auto drawDepth = currentPass()->nextDrawDepth();
 
-    if (currentPass()->fbo == &mRootTarget && mBlendMethod == BlendMethod::Normal && image->clips.empty() && image->geometry.viewport == vp) {
+    auto nativeBlend = _nativeBlend(mBlendMethod);
+    if (currentPass()->fbo == &mRootTarget && nativeBlend && image->clips.empty() && image->geometry.viewport == vp) {
         auto viewRegion = viewportRegion(vp, bbox);
         mSolidBatch.draw(*this, *image, drawDepth, viewRegion, viewRegion);
         return true;
@@ -1221,7 +1296,7 @@ bool GlRenderer::renderImage(void* data)
 
     if (!image->clips.empty()) drawClip(image->clips, bbox);
 
-    auto task = new GlRenderTask(mPrograms[RT_Image]);
+    auto task = new GlRenderTask(mPrograms[RT_Image], nativeBlend ? mBlendMethod : BlendMethod::Normal);
     task->setDrawDepth(drawDepth);
     image->geometry.draw(task, &mGpuBuffer, RenderUpdateFlag::Image);
 
@@ -1262,6 +1337,14 @@ bool GlRenderer::renderShape(RenderData data)
 {
     auto shape = static_cast<GlShape*>(data);
     if (currentPass()->isEmpty() || (!shape->valid.fill && !shape->valid.stroke)) return true;
+    if (mPartialDraw || restoreBounds) {
+        // A paint hidden during recovery needs precise bounds when shown.
+        if (restoreBounds || shape->box == shape->geometry.viewport) {
+            shape->box = shape->geometry.bounds();
+            shape->box.intersect(shape->geometry.viewport);
+        }
+        if (culled(shape->box)) return true;
+    }
 
     auto bbox = shape->geometry.viewport;
     bbox.intersect(currentPass()->getViewport());
@@ -1309,6 +1392,7 @@ bool GlRenderer::renderShape(RenderData data)
 void GlRenderer::dispose(RenderData data)
 {
     auto drawable = static_cast<GlDrawable*>(data);
+    if (!mFullDraw) dirty(drawable, false);
     drawable->destroy(*this);
     delete (drawable);
 }
@@ -1324,7 +1408,13 @@ RenderData GlRenderer::prepare(RenderSurface* surface, RenderData data, const Ma
 
     auto cacheStale = image->texId && (image->stamp != textures.stamp);
     if (cacheStale) flags |= RenderUpdateFlag::Image;
-    if (image->prepare(flags, {float(this->surface.w), float(this->surface.h)}, opacity, false)) return image;
+    if (image->prepare(flags, {float(this->surface.w), float(this->surface.h)}, opacity, false)) {
+        if (opacity == 0) {
+            if (mFullDraw) image->box = {};
+            else dirty(image, false);
+        }
+        return image;
+    }
 
     if (cacheStale || image->texId == 0 || image->surface != surface || image->filter != filter) {
         image->destroy(*this);
@@ -1342,10 +1432,16 @@ RenderData GlRenderer::prepare(RenderSurface* surface, RenderData data, const Ma
         image->geometry.tesselateImage(surface);
     }
 
+    // clipped scenes pass the clip flag with every update, unchanged clippers keep the pixels within the same viewport
+    auto retained = (flags == RenderUpdateFlag::Clip && _sameClips(image->clips, clips));
     if (flags & RenderUpdateFlag::Clip) image->clips = clips;
 
     image->geometry.viewport = vport;
     image->opacity = opacity;
+
+    // The viewport safely covers the paint while bounds tracking is skipped.
+    if (mFullDraw) image->box = image->geometry.viewport;
+    else dirty(image, true, retained);
 
     return image;
 }
@@ -1359,28 +1455,42 @@ RenderData GlRenderer::prepare(const RenderShape& rshape, RenderData data, const
         flags = RenderUpdateFlag::All;
     }
 
-    if (shape->prepare(flags, {float(surface.w), float(surface.h)}, opacity, clipper)) return shape;
+    if (shape->prepare(flags, {float(surface.w), float(surface.h)}, opacity, clipper)) {
+        if (opacity == 0 && !clipper) {
+            if (mFullDraw) shape->box = {};
+            else dirty(shape, false);
+        }
+        return shape;
+    }
 
     if (flags & RenderUpdateFlag::Path) shape->geometry = GlGeometry();
 
     shape->geometry.transform(transform);
     shape->geometry.viewport = vport;
 
-    auto updateStroke = (flags & RenderUpdateFlag::Stroke) && rshape.stroke && std::isfinite(rshape.strokeWidth()) && !tvg::zero(rshape.strokeWidth()) && shape->geometry.optStrokePath.empty();
-    auto updatePath = (flags & (RenderUpdateFlag::Path | RenderUpdateFlag::Transform)) || updateStroke;
+    // TODO: rebuild thin fills and their opacity multiplier when stroke width changes from nonzero to zero?
 
-    if (updatePath) {
+    auto update = (flags & (RenderUpdateFlag::Path | RenderUpdateFlag::Transform)) ||
+        // prepare the stroke path when a stroke becomes visible without a path or transform change.
+        ((flags & RenderUpdateFlag::Stroke) && rshape.stroke && std::isfinite(rshape.strokeWidth()) && !tvg::zero(rshape.strokeWidth()) && shape->geometry.optStrokePath.empty());
+
+    if (update) {
         shape->geometry.prepare(rshape);
-        shape->valid.fill = false;
-        if (shape->geometry.tesselateShape(*(shape->rshape), shape->multiplier)) {
-            shape->valid.fill = true;
-        }
-        shape->valid.stroke = shape->geometry.tesselateStroke(*(shape->rshape));
+        shape->valid.fill = shape->geometry.tesselateShape(rshape, shape->multiplier);
+    }
+    if (update || (flags & RenderUpdateFlag::Stroke)) {
+        shape->valid.stroke = shape->geometry.tesselateStroke(rshape);
     }
 
     shape->opacity = float(opacity) * shape->multiplier;
 
+    // clipped scenes pass the clip flag with every update, unchanged clippers keep the pixels within the same viewport
+    auto retained = (flags == RenderUpdateFlag::Clip && _sameClips(shape->clips, clips));
     if (flags & RenderUpdateFlag::Clip) shape->clips = clips;
+
+    // Hidden paints may become visible without another geometry update.
+    if (mFullDraw) shape->box = shape->geometry.viewport;
+    else dirty(shape, true, retained);
 
     return shape;
 }
@@ -1401,18 +1511,29 @@ bool GlRenderer::postUpdate()
 }
 
 
-void GlRenderer::damage(TVG_UNUSED RenderData rd, TVG_UNUSED const RenderRegion& region)
+void GlRenderer::damage(RenderData rd, const RenderRegion& region)
 {
-    //TODO
+    auto drawable = static_cast<GlDrawable*>(rd);
+    if (mFullDraw || mDirtyRegion.deactivated() || (drawable && drawable->opacity == 0)) return;
+    mDirtyRegion.add(region);
 }
 
 
-bool GlRenderer::partial(bool disable)
+bool GlRenderer::partial(TVG_UNUSED bool disable)
 {
-    //TODO
-    return false;
+    return mDirtyRegion.deactivate(disable);
 }
 
+uint32_t GlRenderer::dirtyRegions() const
+{
+    return 1;
+}
+
+Result GlRenderer::dirtyRegions(Region* regions, TVG_UNUSED uint32_t cnt) const
+{
+    *regions = {0, 0, int32_t(surface.w), int32_t(surface.h)};
+    return Result::Success;
+}
 
 bool GlRenderer::intersectsShape(RenderData data, TVG_UNUSED const RenderRegion& region)
 {
@@ -1462,7 +1583,7 @@ bool GlRenderer::term()
 }
 
 
-GlRenderer* GlRenderer::gen(TVG_UNUSED uint32_t threads, TVG_UNUSED EngineOption op)
+GlRenderer* GlRenderer::gen(TVG_UNUSED uint32_t threads, EngineOption op)
 {
     //initialize engine
     _rendererMtx.lock();
@@ -1477,5 +1598,7 @@ GlRenderer* GlRenderer::gen(TVG_UNUSED uint32_t threads, TVG_UNUSED EngineOption
     ++_rendererCnt;
     _rendererMtx.unlock();
 
-    return new GlRenderer;
+    auto renderer = new GlRenderer;
+    renderer->mDirtyRegion.support = (op == EngineOption::Default || (op & EngineOption::SmartRender));
+    return renderer;
 }

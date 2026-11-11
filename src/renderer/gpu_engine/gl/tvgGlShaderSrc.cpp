@@ -827,13 +827,6 @@ vec3 setSat(vec3 color, float s) {
 }
 )";
 
-const char* NORMAL_BLEND_FRAG = R"(
-void main()
-{
-    FragColor = texture(uSrcTexture, vUV);
-}
-)";
-
 const char* MULTIPLY_BLEND_FRAG = R"(
 void main()
 {
@@ -843,15 +836,6 @@ void main()
         Rc = d.Sc * min(One, d.Dc / d.Da);
         Rc = mix(d.Sc, Rc, d.Da);
     }
-    FragColor = postProcess(vec4(Rc, 1.0));
-}
-)";
-
-const char* SCREEN_BLEND_FRAG = R"(
-void main()
-{
-    getFragData();
-    vec3 Rc = d.Sc + d.Dc - d.Sc * d.Dc;
     FragColor = postProcess(vec4(Rc, 1.0));
 }
 )";
@@ -966,14 +950,6 @@ void main() {
 }
 )";
 
-const char* EXCLUSION_BLEND_FRAG = R"(
-void main() {
-    getFragData();
-    vec3 Rc = d.Sc + d.Dc - 2.0 * d.Sc * d.Dc;
-    FragColor = postProcess(vec4(Rc, 1.0));
-}
-)";
-
 const char* HUE_BLEND_FRAG = R"(
 void main()
 {
@@ -1029,14 +1005,6 @@ void main() {
         Rc = setLum(Dc, dot(d.Sc, LUM_W));
         Rc = mix(d.Sc, Rc, d.Da);
     }
-    FragColor = postProcess(vec4(Rc, 1.0));
-}
-)";
-
-const char* ADD_BLEND_FRAG = R"(
-void main() {
-    getFragData();
-    vec3 Rc = min(One, d.Sc + d.Dc);
     FragColor = postProcess(vec4(Rc, 1.0));
 }
 )";
@@ -1148,6 +1116,37 @@ void main()
     }
     FragColor = weightSum > 0.0 ? colorSum / weightSum : texture(uSrcTexture, vUV);
 } 
+)";
+
+const char* EFFECT_MOTIONBLUR = R"(
+uniform sampler2D uSrcTexture;
+layout(std140) uniform Params {
+    vec2 offset;
+    float samples;
+} uParams;
+
+layout(std140) uniform Viewport {
+    vec4 vp;
+} uViewport;
+
+out vec4 FragColor;
+
+void main()
+{
+    // The pooled texture can be larger than the compositing region.
+    // Clamp sampling coordinates to the region's outermost texel centers.
+    vec2 invTextureSize = 1.0 / vec2(textureSize(uSrcTexture, 0));
+    vec2 maxCoord = uViewport.vp.zw - vec2(0.5);
+    int samples = int(uParams.samples);
+    float invSamples = 1.0 / float(samples);
+    vec4 color = vec4(0.0);
+    for (int i = 0; i < samples; ++i) {
+        float t = (float(i) + 0.5) * invSamples - 0.5;
+        vec2 p = clamp(gl_FragCoord.xy + uParams.offset * t, vec2(0.5), maxCoord);
+        color += textureLod(uSrcTexture, p * invTextureSize, 0.0);
+    }
+    FragColor = color * invSamples;
+}
 )";
 
 const char* EFFECT_DROPSHADOW = R"(

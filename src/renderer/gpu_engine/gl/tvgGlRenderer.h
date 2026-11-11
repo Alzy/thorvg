@@ -36,6 +36,26 @@
 
 struct GlRenderer : RenderMethod
 {
+    enum class BlendSource { Image, Scene, Solid, LinearGradient, RadialGradient, ConicGradient, Count };
+
+    enum BlendShader
+    {
+        BS_Multiply,
+        BS_Overlay,
+        BS_Darken,
+        BS_Lighten,
+        BS_ColorDodge,
+        BS_ColorBurn,
+        BS_HardLight,
+        BS_SoftLight,
+        BS_Difference,
+        BS_Hue,
+        BS_Saturation,
+        BS_Color,
+        BS_Luminosity,
+        BlendShaderCount
+    };
+
     enum RenderTypes
     {
         RT_Color = 0,
@@ -55,115 +75,8 @@ struct GlRenderer : RenderMethod
         RT_MaskDarken,
         RT_Stencil,
         RT_Blit,
-        // blends (image)
-        RT_Blend_Image_Normal,
-        RT_Blend_Image_Multiply,
-        RT_Blend_Image_Screen,
-        RT_Blend_Image_Overlay,
-        RT_Blend_Image_Darken,
-        RT_Blend_Image_Lighten,
-        RT_Blend_Image_ColorDodge,
-        RT_Blend_Image_ColorBurn,
-        RT_Blend_Image_HardLight,
-        RT_Blend_Image_SoftLight,
-        RT_Blend_Image_Difference,
-        RT_Blend_Image_Exclusion,
-        RT_Blend_Image_Hue,
-        RT_Blend_Image_Saturation,
-        RT_Blend_Image_Color,
-        RT_Blend_Image_Luminosity,
-        RT_Blend_Image_Add,
-        // blends (scene)
-        RT_Blend_Scene_Normal,
-        RT_Blend_Scene_Multiply,
-        RT_Blend_Scene_Screen,
-        RT_Blend_Scene_Overlay,
-        RT_Blend_Scene_Darken,
-        RT_Blend_Scene_Lighten,
-        RT_Blend_Scene_ColorDodge,
-        RT_Blend_Scene_ColorBurn,
-        RT_Blend_Scene_HardLight,
-        RT_Blend_Scene_SoftLight,
-        RT_Blend_Scene_Difference,
-        RT_Blend_Scene_Exclusion,
-        RT_Blend_Scene_Hue,
-        RT_Blend_Scene_Saturation,
-        RT_Blend_Scene_Color,
-        RT_Blend_Scene_Luminosity,
-        RT_Blend_Scene_Add,
-        // shape blends (solid)
-        RT_ShapeBlend_Solid_Normal,
-        RT_ShapeBlend_Solid_Multiply,
-        RT_ShapeBlend_Solid_Screen,
-        RT_ShapeBlend_Solid_Overlay,
-        RT_ShapeBlend_Solid_Darken,
-        RT_ShapeBlend_Solid_Lighten,
-        RT_ShapeBlend_Solid_ColorDodge,
-        RT_ShapeBlend_Solid_ColorBurn,
-        RT_ShapeBlend_Solid_HardLight,
-        RT_ShapeBlend_Solid_SoftLight,
-        RT_ShapeBlend_Solid_Difference,
-        RT_ShapeBlend_Solid_Exclusion,
-        RT_ShapeBlend_Solid_Hue,
-        RT_ShapeBlend_Solid_Saturation,
-        RT_ShapeBlend_Solid_Color,
-        RT_ShapeBlend_Solid_Luminosity,
-        RT_ShapeBlend_Solid_Add,
-        // shape blends (linear gradient)
-        RT_ShapeBlend_Linear_Normal,
-        RT_ShapeBlend_Linear_Multiply,
-        RT_ShapeBlend_Linear_Screen,
-        RT_ShapeBlend_Linear_Overlay,
-        RT_ShapeBlend_Linear_Darken,
-        RT_ShapeBlend_Linear_Lighten,
-        RT_ShapeBlend_Linear_ColorDodge,
-        RT_ShapeBlend_Linear_ColorBurn,
-        RT_ShapeBlend_Linear_HardLight,
-        RT_ShapeBlend_Linear_SoftLight,
-        RT_ShapeBlend_Linear_Difference,
-        RT_ShapeBlend_Linear_Exclusion,
-        RT_ShapeBlend_Linear_Hue,
-        RT_ShapeBlend_Linear_Saturation,
-        RT_ShapeBlend_Linear_Color,
-        RT_ShapeBlend_Linear_Luminosity,
-        RT_ShapeBlend_Linear_Add,
-        // shape blends (radial gradient)
-        RT_ShapeBlend_Radial_Normal,
-        RT_ShapeBlend_Radial_Multiply,
-        RT_ShapeBlend_Radial_Screen,
-        RT_ShapeBlend_Radial_Overlay,
-        RT_ShapeBlend_Radial_Darken,
-        RT_ShapeBlend_Radial_Lighten,
-        RT_ShapeBlend_Radial_ColorDodge,
-        RT_ShapeBlend_Radial_ColorBurn,
-        RT_ShapeBlend_Radial_HardLight,
-        RT_ShapeBlend_Radial_SoftLight,
-        RT_ShapeBlend_Radial_Difference,
-        RT_ShapeBlend_Radial_Exclusion,
-        RT_ShapeBlend_Radial_Hue,
-        RT_ShapeBlend_Radial_Saturation,
-        RT_ShapeBlend_Radial_Color,
-        RT_ShapeBlend_Radial_Luminosity,
-        RT_ShapeBlend_Radial_Add,
-        // shape blends (conic gradient)
-        RT_ShapeBlend_Conic_Normal,
-        RT_ShapeBlend_Conic_Multiply,
-        RT_ShapeBlend_Conic_Screen,
-        RT_ShapeBlend_Conic_Overlay,
-        RT_ShapeBlend_Conic_Darken,
-        RT_ShapeBlend_Conic_Lighten,
-        RT_ShapeBlend_Conic_ColorDodge,
-        RT_ShapeBlend_Conic_ColorBurn,
-        RT_ShapeBlend_Conic_HardLight,
-        RT_ShapeBlend_Conic_SoftLight,
-        RT_ShapeBlend_Conic_Difference,
-        RT_ShapeBlend_Conic_Exclusion,
-        RT_ShapeBlend_Conic_Hue,
-        RT_ShapeBlend_Conic_Saturation,
-        RT_ShapeBlend_Conic_Color,
-        RT_ShapeBlend_Conic_Luminosity,
-        RT_ShapeBlend_Conic_Add,
-        RT_None
+        RT_Blend,
+        RT_None = RT_Blend + BlendShaderCount * uint32_t(BlendSource::Count)
     };
 
     //main features
@@ -201,6 +114,8 @@ struct GlRenderer : RenderMethod
     //partial rendering
     void damage(RenderData rd, const RenderRegion& region) override;
     bool partial(bool disable) override;
+    uint32_t dirtyRegions() const override;
+    Result dirtyRegions(Region* regions, uint32_t cnt) const override;
 
     static GlRenderer* gen(uint32_t threads, EngineOption op);
     static bool term();
@@ -209,8 +124,6 @@ struct GlRenderer : RenderMethod
     void disposeTexture(GLuint texId);
 
     TextureMgr textures;
-
-    enum class BlendSource { Image, Scene, Solid, LinearGradient, RadialGradient, ConicGradient };
 
     GlRenderer(); 
     ~GlRenderer();
@@ -235,6 +148,8 @@ struct GlRenderer : RenderMethod
     void flush();
     void clearDisposes();
     bool currentContext();
+    void dirty(GlDrawable* drawable, bool visible, bool retained = false);
+    bool culled(const RenderRegion& box);
 
     void* mDisplay = nullptr;   // EGLDisplay for EGL; unused for other app-managed contexts.
     void* mSurface = nullptr;   // EGLSurface for EGL, HDC for WGL; unused for other app-managed contexts.
@@ -261,8 +176,16 @@ struct GlRenderer : RenderMethod
         Key key;
     } mDisposed;
 
+    RenderDirtyRegion mDirtyRegion;
+    Array<RenderRegion> mRenderRegions;  // the disjoint regions redrawn by the current frame
+    RenderRegion mRenderBounds;          // the bounds of the redrawn regions
+
     BlendMethod mBlendMethod = BlendMethod::Normal;
     bool mClearBuffer = false;
+    bool mFullDraw = true;      // the next frame must redraw everything
+    bool mPartialDraw = false;  // the current frame redraws the dirty regions only
+    bool restoreBounds = false;  // restore precise bounds before partial rendering resumes
+    bool mBlended = false;      // a blended scene was composited since the last frame
 };
 
 #endif /* _TVG_GL_RENDERER_H_ */

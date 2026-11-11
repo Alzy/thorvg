@@ -36,7 +36,7 @@ bool GlIntersector::intersect(const tvg::Array<tvg::RenderData>& clips, const Po
         const auto& geometry = clip->geometry;
         if (clip->valid.fill) {
             auto p = geometry.fillWorld ? pt : pt * geometry.itransform();
-            if (!geometry.fillBBox.inside(p) || !gpuPointInEvenOddMesh(p, geometry.fill.vertex.data, geometry.fill.index.data, geometry.fill.index.count)) return false;
+            if (!geometry.fillBBox.inside(p) || !gpuPointInFillMesh(p, geometry.fill.vertex.data, geometry.fill.index.data, geometry.fill.index.count, geometry.fillRule)) return false;
         } else if (clip->valid.stroke) {
             auto p = pt * geometry.itransform();
             if (!geometry.strokeBBox.inside(p) || !gpuPointInAnyMesh(p, geometry.stroke.vertex.data, geometry.stroke.index.data, geometry.stroke.index.count)) return false;
@@ -48,7 +48,8 @@ bool GlIntersector::intersect(const tvg::Array<tvg::RenderData>& clips, const Po
 bool GlIntersector::intersect(const GlShape* shape, const RenderRegion& region)
 {
     const auto& geometry = shape->geometry;
-    auto validFill = shape->valid.fill && !geometry.fill.index.empty();
+    // the fill is tessellated regardless of its paint (clippers need it), so skip it if nothing is filled
+    auto validFill = shape->valid.fill && !geometry.fill.index.empty() && (shape->rshape->fill || shape->rshape->color.a > 0);
     auto validStroke = shape->valid.stroke && !geometry.stroke.index.empty();
     if (!validFill && !validStroke) return false;
 
@@ -59,11 +60,11 @@ bool GlIntersector::intersect(const GlShape* shape, const RenderRegion& region)
     for (int32_t y = 0; y < sizeY; y++) {
         auto py = (y % 2 == 0) ? y : sizeY - y - sizeY % 2;
         for (int32_t x = 0; x < sizeX; x++) {
-            Point pt{(float)x + region.min.x, (float)py + region.min.y};
+            Point pt{(float)x + region.xMin, (float)py + region.yMin};
             auto hit = false;
             if (validFill) {
                 auto p = geometry.fillWorld ? pt : pt * itransform;
-                hit = geometry.fillBBox.inside(p) && gpuPointInEvenOddMesh(p, geometry.fill.vertex.data, geometry.fill.index.data, geometry.fill.index.count);
+                hit = geometry.fillBBox.inside(p) && gpuPointInFillMesh(p, geometry.fill.vertex.data, geometry.fill.index.data, geometry.fill.index.count, geometry.fillRule);
             }
             if (!hit && validStroke) {
                 auto p = pt * itransform;
@@ -93,7 +94,7 @@ bool GlIntersector::intersect(const GlImage* image, const RenderRegion& region)
     for (int32_t y = 0; y < sizeY; y++) {
         auto py = (y % 2 == 0) ? y : sizeY - y - sizeY % 2;
         for (int32_t x = 0; x < sizeX; x++) {
-            Point pt{(float)x + region.min.x, (float)py + region.min.y};
+            Point pt{(float)x + region.xMin, (float)py + region.yMin};
             if (gpuPointInQuad(pt, triangle) && intersect(image->clips, pt)) return true;
         }
     }
@@ -175,7 +176,7 @@ bool GlGeometry::tesselateThinFill(const RenderPath& path)
     // Thin fills borrow stroke tessellation, but the generated stroke buffer is
     // temporary. It must be moved into fill before this function returns.
     Stroker stroker(&stroke, MIN_GL_STROKE_WIDTH, StrokeCap::Butt, StrokeJoin::Bevel);
-    stroker.run(path); // path is already in world space.
+    stroker.run(path, true); // Preserve winding for thin fills.
     stroke.index.move(fill.index);
     stroke.vertex.move(fill.vertex);
     fillBBox = stroker.bounds();
@@ -206,6 +207,7 @@ bool GlGeometry::tesselateStroke(const RenderShape& rshape)
     if (gpuStrokeDash(rshape, dashed, nullptr)) stroker.run(dashed);
     else stroker.run(optStrokePath);
     strokeBBox = stroker.bounds();
+    strokeDirect = stroker.overlapFree;
     return true;
 }
 
@@ -243,7 +245,7 @@ void GlGeometry::tesselateImage(const RenderSurface* image)
     fill.index.push(1);
     fill.index.push(3);
 
-    fillBBox = gpuTransformBounds(RenderRegion{{0, 0}, {int32_t(image->w), int32_t(image->h)}}, matrix);
+    fillBBox = gpuTransformBounds(RenderRegion{0, 0, int32_t(image->w), int32_t(image->h)}, matrix);
 }
 
 void GlGeometry::draw(GlRenderTask* task, GlStageBuffer* gpuBuffer, RenderUpdateFlag flag) const
@@ -265,8 +267,7 @@ void GlGeometry::draw(GlRenderTask* task, GlStageBuffer* gpuBuffer, RenderUpdate
 
 GlStencilMode GlGeometry::stencilMode(RenderUpdateFlag flag) const
 {
-    if (flag & RenderUpdateFlag::Stroke) return GlStencilMode::Stroke;
-    if (flag & RenderUpdateFlag::GradientStroke) return GlStencilMode::Stroke;
+    if (flag & (RenderUpdateFlag::Stroke | RenderUpdateFlag::GradientStroke)) return strokeDirect ? GlStencilMode::None : GlStencilMode::Stroke;
     if (flag & RenderUpdateFlag::Image) return GlStencilMode::None;
 
     if (convex) return GlStencilMode::None;

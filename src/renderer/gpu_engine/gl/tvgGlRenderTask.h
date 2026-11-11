@@ -72,8 +72,8 @@ struct GlBindingResource
 
 struct GlRenderTask
 {
-    GlRenderTask(GlProgram* program) :
-        program(program) {}
+    GlRenderTask(GlProgram* program, BlendMethod blendMethod = BlendMethod::Normal) :
+        program(program), blendMethod(blendMethod) {}
 
     virtual ~GlRenderTask() = default;
     virtual void run(GlStateCache& state);
@@ -105,6 +105,7 @@ struct GlRenderTask
     bool useViewMatrix = false;
     bool useVertexColor = false;
     bool useDrawArrays = false;
+    BlendMethod blendMethod = BlendMethod::Normal;
 };
 
 struct GlStencilCoverTask : GlRenderTask
@@ -140,6 +141,7 @@ struct GlComposeTask : GlRenderTask
     Array<GlRenderTask*> tasks;
     uint32_t renderWidth = 0;
     uint32_t renderHeight = 0;
+    const Array<RenderRegion>* partial = nullptr;  // the only regions to redraw, the rest is retained
     bool clearBuffer = true;
 };
 
@@ -282,10 +284,10 @@ struct GlEffectDropShadowTask : GlRenderTask
     GlRenderTarget* dstCopyFbo1;
 };
 
-struct GlEffectColorTransformTask : GlRenderTask
+struct GlEffectTask : GlRenderTask
 {
-    GlEffectColorTransformTask(GlProgram* program, GlRenderTarget* dstFbo, GlRenderTarget* dstCopyFbo) :
-        GlRenderTask(program), dstFbo(dstFbo), dstCopyFbo(dstCopyFbo){};
+    GlEffectTask(GlProgram* program, GlRenderTarget* dstFbo, GlRenderTarget* dstCopyFbo) :
+        GlRenderTask(program), dstFbo(dstFbo), dstCopyFbo(dstCopyFbo) {};
 
     void run(GlStateCache& state) override;
 

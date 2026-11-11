@@ -35,7 +35,7 @@ struct WgGradientTexture
     WGPUTextureView textureView{};
     WGPUBindGroup bindGroup{};
 
-    void update(WgContext& context, const Fill* fill, FillSpread& currentSpread);
+    bool update(WgContext& context, const Fill* fill, FillSpread& currentSpread);
     void release(WgContext& context);
 };
 
@@ -63,6 +63,7 @@ struct WgRenderSettings
     WgRenderSettingsType fillType{};
     float opacityMultiplier = 1.0f;
     bool valid = false;
+    bool opaque;
     FillSpread spread{};  // cached here to use existing tail padding
 
     uint8_t update(tvg::ColorSpace cs, uint8_t opacity);
@@ -108,6 +109,7 @@ struct WgShape : WgPaint
     FillRule fillRule;
     bool convex;
     bool strokeFirst;
+    bool strokeOverlapFree;
 
     void expand(const BBox& bb);
     void update(const RenderShape& rshape, const RenderRegion& vport, uint8_t shapeOpacity, uint8_t strokeOpacity, uint8_t opacity);
@@ -119,7 +121,7 @@ struct WgShape : WgPaint
     {
         auto& min = bbox.min;
         auto& max = bbox.max;
-        return {{int32_t(nearbyint(min.x)), int32_t(nearbyint(min.y))}, {int32_t(nearbyint(max.x)), int32_t(nearbyint(max.y))}};
+        return {int32_t(nearbyint(min.x)), int32_t(nearbyint(min.y)), int32_t(nearbyint(max.x)), int32_t(nearbyint(max.y))};
     }
 
     Type type() override { return Type::Shape; };
@@ -176,16 +178,15 @@ struct WgStencilBatchRange
     bool solidOnly;
 };
 
-// gaussian blur, drop shadow, fill, tint, tritone
-#define WG_GAUSSIAN_MAX_LEVEL 3
-struct WgRenderEffectParams
+struct WgRenderEffect
 {
     WGPUBindGroup bindGroupParams{};
     WGPUBuffer bufferParams{};
-    uint32_t extend{};
-    Point offset{};
+    uint32_t extend;
+    Point offset;
 
-    void update(WgContext& context, WgShaderTypeEffectParams& effectParams);
+    void update(WgContext& context, WgShaderTypeEffectParams& params);
+    void update(WgContext& context, RenderEffectMotionBlur* motion, const Matrix& transform);
     void update(WgContext& context, RenderEffectGaussianBlur* gaussian, const Matrix& transform);
     void update(WgContext& context, RenderEffectDropShadow* dropShadow, const Matrix& transform);
     void update(WgContext& context, RenderEffectFill* fill);
@@ -194,16 +195,15 @@ struct WgRenderEffectParams
     void release(WgContext& context);
 };
 
-struct WgRenderEffectParamsPool
+struct WgRenderEffectPool
 {
-    // pool contains all created but unused render data for params
-    Array<WgRenderEffectParams*> mPool;
-    // list contains all created render data for params
-    // to ensure that all created instances will be released
-    Array<WgRenderEffectParams*> mList;
+    // pool contains all created but unused render effects
+    Array<WgRenderEffect*> mPool;
+    // list contains all created render effects to ensure that all created instances will be released
+    Array<WgRenderEffect*> mList;
 
-    WgRenderEffectParams* allocate(WgContext& context);
-    void free(WgContext& context, WgRenderEffectParams* rdata);
+    WgRenderEffect* allocate(WgContext& context);
+    void free(WgContext& context, WgRenderEffect* rdata);
     void release(WgContext& context);
 };
 

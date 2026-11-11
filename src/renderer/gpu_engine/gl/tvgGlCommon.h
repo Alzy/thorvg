@@ -127,6 +127,7 @@ struct GlGeometry
     bool optPathThin : 1;
     bool optPathSkipFill : 1;
     bool convex : 1;
+    bool strokeDirect;
 };
 
 struct GlDrawable
@@ -140,6 +141,7 @@ struct GlDrawable
     Point size;  // view size
     uint32_t opacity;
     RenderUpdateFlag flags = RenderUpdateFlag::None;  // a backup flag for deferred update
+    RenderRegion box{};                               // last reported region for partial rendering
 };
 
 struct GlShape : GlDrawable

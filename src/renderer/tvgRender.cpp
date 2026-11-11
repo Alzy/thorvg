@@ -24,7 +24,42 @@
 #include "tvgRender.h"
 
 /************************************************************************/
-/* RenderMethod Class Implementation                                    */
+/* RenderSurface                                                        */
+/************************************************************************/
+
+RenderSurface::RenderSurface(const RenderSurface* rhs)
+{
+    data = rhs->data;
+    stride = rhs->stride;
+    w = rhs->w;
+    h = rhs->h;
+    cs = rhs->cs;
+    channelSize = rhs->channelSize;
+    premultiplied = rhs->premultiplied;
+    opaque = rhs->opaque;
+}
+
+void RenderSurface::setup(pixel_t* data, uint32_t stride, uint32_t w, uint32_t h, uint8_t channelSize, ColorSpace cs)
+{
+    if (cs == ColorSpace::XBGR8888) {
+        cs = ColorSpace::ABGR8888;
+        this->opaque = true;
+    } else if (cs == ColorSpace::XRGB8888) {
+        cs = ColorSpace::ARGB8888;
+        this->opaque = true;
+    }
+
+    this->data = data;
+    this->stride = stride;
+    this->w = w;
+    this->h = h;
+    this->channelSize = channelSize;
+    this->cs = cs;
+    this->premultiplied = (cs == ColorSpace::ABGR8888 || cs == ColorSpace::ARGB8888);
+}
+
+/************************************************************************/
+/* RenderMethod                                                         */
 /************************************************************************/
 
 uint32_t RenderMethod::ref()
@@ -55,7 +90,7 @@ bool RenderMethod::viewport(const RenderRegion& vp)
 
 
 /************************************************************************/
-/* RenderPath Class Implementation                                      */
+/* RenderPath                                                           */
 /************************************************************************/
 
 // used as a temporary buffer
@@ -149,47 +184,31 @@ void RenderPath::addRect(float x, float y, float w, float h, float rx, float ry,
         cmds[9] = PathCommand::Close;
         pts[0] = {x + w, y + ry};  // move
 
-        if (cw) {
-            cmds[1] = cmds[3] = cmds[5] = cmds[7] = PathCommand::LineTo;
-            cmds[2] = cmds[4] = cmds[6] = cmds[8] = PathCommand::CubicTo;
+        cmds[1] = cmds[3] = cmds[5] = cmds[7] = cw ? PathCommand::LineTo : PathCommand::CubicTo;
+        cmds[2] = cmds[4] = cmds[6] = cmds[8] = cw ? PathCommand::CubicTo : PathCommand::LineTo;
 
-            pts[1] = {x + w, y + h - ry};  // line
-            pts[2] = {x + w, y + h - ry + hr.y};
-            pts[3] = {x + w - rx + hr.x, y + h};
-            pts[4] = {x + w - rx, y + h};  // cubic
-            pts[5] = {x + rx, y + h};      // line
-            pts[6] = {x + rx - hr.x, y + h};
-            pts[7] = {x, y + h - ry + hr.y};
-            pts[8] = {x, y + h - ry};  // cubic
-            pts[9] = {x, y + ry};      // line
-            pts[10] = {x, y + ry - hr.y};
-            pts[11] = {x + rx - hr.x, y};
-            pts[12] = {x + rx, y};      // cubic
-            pts[13] = {x + w - rx, y};  // line
-            pts[14] = {x + w - rx + hr.x, y};
-            pts[15] = {x + w, y + ry - hr.y};
-            pts[16] = {x + w, y + ry};  // cubic
-        } else {
-            cmds[1] = cmds[3] = cmds[5] = cmds[7] = PathCommand::CubicTo;
-            cmds[2] = cmds[4] = cmds[6] = cmds[8] = PathCommand::LineTo;
+        // Reverse the clockwise point order for CCW, keeping the endpoints fixed.
+        static constexpr uint8_t indices[2][16] = {
+            {0, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1},
+            {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}};
+        auto idx = indices[cw];
 
-            pts[1] = {x + w, y + ry - hr.y};
-            pts[2] = {x + w - rx + hr.x, y};
-            pts[3] = {x + w - rx, y};  // cubic
-            pts[4] = {x + rx, y};      // line
-            pts[5] = {x + rx - hr.x, y};
-            pts[6] = {x, y + ry - hr.y};
-            pts[7] = {x, y + ry};      // cubic
-            pts[8] = {x, y + h - ry};  // line
-            pts[9] = {x, y + h - ry + hr.y};
-            pts[10] = {x + rx - hr.x, y + h};
-            pts[11] = {x + rx, y + h};      // cubic
-            pts[12] = {x + w - rx, y + h};  // line
-            pts[13] = {x + w - rx + hr.x, y + h};
-            pts[14] = {x + w, y + h - ry + hr.y};
-            pts[15] = {x + w, y + h - ry};  // cubic
-            pts[16] = {x + w, y + ry};      // line
-        }
+        pts[idx[1]] = {x + w, y + h - ry};  // line
+        pts[idx[2]] = {x + w, y + h - ry + hr.y};
+        pts[idx[3]] = {x + w - rx + hr.x, y + h};
+        pts[idx[4]] = {x + w - rx, y + h};  // cubic
+        pts[idx[5]] = {x + rx, y + h};      // line
+        pts[idx[6]] = {x + rx - hr.x, y + h};
+        pts[idx[7]] = {x, y + h - ry + hr.y};
+        pts[idx[8]] = {x, y + h - ry};  // cubic
+        pts[idx[9]] = {x, y + ry};      // line
+        pts[idx[10]] = {x, y + ry - hr.y};
+        pts[idx[11]] = {x + rx - hr.x, y};
+        pts[idx[12]] = {x + rx, y};      // cubic
+        pts[idx[13]] = {x + w - rx, y};  // line
+        pts[idx[14]] = {x + w - rx + hr.x, y};
+        pts[idx[15]] = {x + w, y + ry - hr.y};
+        pts[16] = {x + w, y + ry};  // cubic
 
         this->cmds.count += 10;
         this->pts.count += 17;
@@ -243,20 +262,19 @@ bool RenderPath::bounds(const Matrix* m, BBox& box)
 }
 
 /************************************************************************/
-/* RenderRegion Class Implementation                                    */
+/* RenderRegion                                                         */
 /************************************************************************/
-
 
 void RenderRegion::intersect(const RenderRegion& rhs)
 {
-    if (min.x < rhs.min.x) min.x = rhs.min.x;
-    if (min.y < rhs.min.y) min.y = rhs.min.y;
-    if (max.x > rhs.max.x) max.x = rhs.max.x;
-    if (max.y > rhs.max.y) max.y = rhs.max.y;
+    if (xMin < rhs.xMin) xMin = rhs.xMin;
+    if (yMin < rhs.yMin) yMin = rhs.yMin;
+    if (xMax > rhs.xMax) xMax = rhs.xMax;
+    if (yMax > rhs.yMax) yMax = rhs.yMax;
 
     // Not intersected: collapse to zero-area region
-    if (max.x < min.x) max.x = min.x;
-    if (max.y < min.y) max.y = min.y;
+    if (xMax < xMin) xMax = xMin;
+    if (yMax < yMin) yMax = yMin;
 }
 
 #ifdef THORVG_PARTIAL_RENDER_SUPPORT
@@ -277,11 +295,13 @@ void RenderDirtyRegion::init(uint32_t w, uint32_t h)
             auto& partition = partitions[y * cnt + x];
             partition.list[0].reserve(64);
             auto& region = partition.region;
-            region.min = {x * px, y * py};
-            region.max = {region.min.x + px, region.min.y + py};
+            region.xMin = x * px;
+            region.yMin = y * py;
+            region.xMax = region.xMin + px;
+            region.yMax = region.yMin + py;
             //leftovers
-            if (x == cnt -1) region.max.x += lx;
-            if (y == cnt -1) region.max.y += ly;
+            if (x == cnt - 1) region.xMax += lx;
+            if (y == cnt - 1) region.yMax += ly;
         }
     }
 }
@@ -291,7 +311,7 @@ bool RenderDirtyRegion::add(const RenderRegion& bbox)
 {
     for (int idx = 0; idx < PARTITIONING; ++idx) {
         auto& partition = partitions[idx];
-        if (bbox.max.y <= partition.region.min.y) break;
+        if (bbox.yMax <= partition.region.yMin) break;
         if (bbox.intersected(partition.region)) {
             ScopedLock lock(key);
             partition.list[partition.current].push(RenderRegion::intersect(bbox, partition.region));
@@ -335,18 +355,18 @@ void RenderDirtyRegion::subdivide(Array<RenderRegion>& targets, uint32_t idx, Re
     uint32_t cnt = 0;
 
     //subtract top
-    if (rhs.min.y < lhs.min.y) {
-        temp[cnt++] = {{rhs.min.x, rhs.min.y}, {rhs.max.x, lhs.min.y}};
-        rhs.min.y = lhs.min.y;
+    if (rhs.yMin < lhs.yMin) {
+        temp[cnt++] = {rhs.xMin, rhs.yMin, rhs.xMax, lhs.yMin};
+        rhs.yMin = lhs.yMin;
     }
     //subtract bottom
-    if (rhs.max.y > lhs.max.y) {
-        temp[cnt++] = {{rhs.min.x, lhs.max.y}, {rhs.max.x, rhs.max.y}};
-        rhs.max.y = lhs.max.y;
+    if (rhs.yMax > lhs.yMax) {
+        temp[cnt++] = {rhs.xMin, lhs.yMax, rhs.xMax, rhs.yMax};
+        rhs.yMax = lhs.yMax;
     }
     //subtract right
-    if (rhs.max.x > lhs.max.x) {
-        temp[cnt++] = {{lhs.max.x, rhs.min.y}, {rhs.max.x, rhs.max.y}};
+    if (rhs.xMax > lhs.xMax) {
+        temp[cnt++] = {lhs.xMax, rhs.yMin, rhs.xMax, rhs.yMax};
     }
 
     //Please reserve memory enough with targets.reserve()
@@ -365,9 +385,9 @@ void RenderDirtyRegion::subdivide(Array<RenderRegion>& targets, uint32_t idx, Re
     targets.count += (cnt - 1);
 
     //sorting by x coord again, only for the updated region
-    while (dst < targets.end() && dst->min.x < rhs.max.x) ++dst;
+    while (dst < targets.end() && dst->xMin < rhs.xMax) ++dst;
     stable_sort(&targets[idx], dst, [](const RenderRegion& a, const RenderRegion& b) -> bool {
-        return a.min.x < b.min.x;
+        return a.xMin < b.xMin;
     });
 }
 
@@ -391,7 +411,7 @@ void RenderDirtyRegion::commit()
 
         //sorting by x coord. guarantee the stable performance: O(NlogN)
         stable_sort(targets.begin(), targets.end(), [](const RenderRegion& a, const RenderRegion& b) -> bool {
-            return a.min.x < b.min.x;
+            return a.xMin < b.xMin;
         });
 
         //Optimized using sweep-line algorithm: O(NlogN)
@@ -403,7 +423,7 @@ void RenderDirtyRegion::commit()
             for (uint32_t j = i + 1; j < targets.count; ++j) {
                 auto& rhs = targets[j];
                 if (rhs.invalid()) continue;
-                if (lhs.max.x < rhs.min.x) break;   //line sweeping
+                if (lhs.xMax < rhs.xMin) break;  // line sweeping
 
                 //fully overlapped. drop lhs
                 if (rhs.contained(lhs)) {
@@ -416,19 +436,19 @@ void RenderDirtyRegion::commit()
                     continue;
                 }
                 //just merge & expand on x axis
-                if (lhs.min.y == rhs.min.y && lhs.max.y == rhs.max.y) {
-                    if (lhs.max.x >= rhs.min.x) {
-                        lhs.max.x = rhs.max.x;
+                if (lhs.yMin == rhs.yMin && lhs.yMax == rhs.yMax) {
+                    if (lhs.xMax >= rhs.xMin) {
+                        lhs.xMax = rhs.xMax;
                         rhs = {};
                         j = i;   //lhs dirty region has been damaged, try again.
                         continue;
                     }
                 }
                 //just merge & expand on y axis
-                if (lhs.min.x == rhs.min.x && lhs.max.x == rhs.max.x) {
-                    if (lhs.min.y <= rhs.max.y && rhs.min.y <= lhs.max.y) {
-                        rhs.min.y = std::min(lhs.min.y, rhs.min.y);
-                        rhs.max.y = std::max(lhs.max.y, rhs.max.y);
+                if (lhs.xMin == rhs.xMin && lhs.xMax == rhs.xMax) {
+                    if (lhs.yMin <= rhs.yMax && rhs.yMin <= lhs.yMax) {
+                        rhs.yMin = std::min(lhs.yMin, rhs.yMin);
+                        rhs.yMax = std::max(lhs.yMax, rhs.yMax);
                         merged = true;
                         break;
                     }
@@ -448,7 +468,7 @@ void RenderDirtyRegion::commit()
 #endif
 
 /************************************************************************/
-/* RenderTrimPath Class Implementation                                  */
+/* RenderTrimPath                                                       */
 /************************************************************************/
 
 #define EPSILON 1e-4f

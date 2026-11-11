@@ -107,10 +107,10 @@ void WgShaderTypeVec4f::update(const ColorSpace colorSpace, uint8_t o)
 
 void WgShaderTypeVec4f::update(const RenderRegion& r)
 {
-    vec[0] = r.min.x;
-    vec[1] = r.min.y;
-    vec[2] = r.max.x - 1;
-    vec[3] = r.max.y - 1;
+    vec[0] = r.xMin;
+    vec[1] = r.yMin;
+    vec[2] = r.xMax - 1;
+    vec[3] = r.yMax - 1;
 }
 
 //************************************************************************
@@ -147,13 +147,13 @@ void WgShaderTypeGradSettings::update(const Fill* fill, const Matrix* transform)
 // WgShaderTypeGradientData
 //************************************************************************
 
-void WgShaderTypeGradientData::update(const Fill* fill)
+bool WgShaderTypeGradientData::update(const Fill* fill)
 {
     const Fill::ColorStop* stops = nullptr;
     auto stopCnt = fill->colorStops(&stops);
     if (stopCnt == 0) {
         std::memset(data, 0, sizeof(data));
-        return;
+        return false;
     }
 
     auto assign = [](uint8_t* dst, const Fill::ColorStop& color) {
@@ -163,9 +163,11 @@ void WgShaderTypeGradientData::update(const Fill* fill)
     static Array<Fill::ColorStop> sstops(stopCnt);
     sstops.clear();
     sstops.push(stops[0]);
+    auto opaque = stops[0].a == 255;
 
     // filter by increasing offset
     for (uint32_t i = 1; i < stopCnt; i++) {
+        opaque &= stops[i].a == 255;
         if (sstops.last().offset < stops[i].offset) sstops.push(stops[i]);
         else if (sstops.last().offset == stops[i].offset) sstops.last() = stops[i];
     }
@@ -197,11 +199,22 @@ void WgShaderTypeGradientData::update(const Fill* fill)
     for (uint32_t ti = range_s; ti < range_e; ti++, dst += 4) {
         assign(dst, colorStopLast);
     }
+    return opaque;
 }
 
 //************************************************************************
 // WgShaderTypeEffectParams
 //************************************************************************
+
+bool WgShaderTypeEffectParams::update(RenderEffectMotionBlur* motion, const Matrix& transform)
+{
+    int samples;
+    if (!motion->update(transform, offset, samples)) return false;
+    params[0] = offset.x;
+    params[1] = offset.y;
+    params[2] = samples;
+    return true;
+}
 
 bool WgShaderTypeEffectParams::update(RenderEffectGaussianBlur* gaussian, const Matrix& transform)
 {
